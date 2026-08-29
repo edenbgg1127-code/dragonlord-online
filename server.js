@@ -33,6 +33,22 @@ async function initStore() {
   if (DATABASE_URL) {
     const { Pool } = require('pg');
     const needSSL = !/localhost|127\.0\.0\.1/.test(DATABASE_URL);
+    // 連線資訊診斷（不會印出密碼）
+    try {
+      const u = new URL(DATABASE_URL);
+      const user = decodeURIComponent(u.username || '(未指定)');
+      console.log(`→ 連線目標：主機=${u.hostname} 連接埠=${u.port || 5432} 使用者=${user} 資料庫=${u.pathname.slice(1)}`);
+      if (/pooler\.supabase\.com/.test(u.hostname) && !user.includes('.')) {
+        console.warn('⚠ 這是 Supabase pooler，但使用者名稱缺少專案代號（應為 postgres.專案代號）');
+      }
+      if (/^db\..*\.supabase\.co$/.test(u.hostname)) {
+        console.warn('⚠ 你用的是 Supabase「Direct connection」，Render 無法連線（IPv6）。請改用 Connect → Session pooler 的字串。');
+      }
+      if (!u.password) console.warn('⚠ 連線字串沒有密碼');
+      else if (/^\[.*\]$/.test(decodeURIComponent(u.password))) console.warn('⚠ 密碼還是 [YOUR-PASSWORD] 佔位符，請換成真正的密碼');
+    } catch (e) {
+      console.warn('⚠ DATABASE_URL 格式無法解析，請確認整串完整複製（開頭應為 postgresql://）');
+    }
     // 用連線池：閒置斷線會自動重連（Supabase / Neon 都會在閒置時斷開）
     pgClient = new Pool({
       connectionString: DATABASE_URL,
@@ -140,13 +156,15 @@ function rollQuality(table) {
   for (const [q, p] of table) { if (r < p) return q; r -= p; }
   return table === G.BOSS_QUALITY_ROLL ? 1 : 0;
 }
-function bossDropItems(gearTier) {
+function bossDropItems(gearTier, mainClass) {
   const n = rndi(1, 3);
   const items = [];
+  const classes = ['warrior', 'archer', 'assassin'];
   for (let i = 0; i < n; i++) {
     const q = rollQuality(G.BOSS_QUALITY_ROLL);
     const slot = G.SLOTS[rndi(0, G.SLOTS.length - 1)];
-    const forClass = ['warrior', 'archer', 'assassin'][rndi(0, 2)];
+    // 武器 80% 掉擊殺者可用的職業，避免撿到一堆不能裝的武器
+    const forClass = (mainClass && Math.random() < 0.8) ? mainClass : classes[rndi(0, 2)];
     items.push(makeEquip(gearTier, slot, q, forClass));
   }
   return items;
@@ -199,7 +217,8 @@ world.forEach((w, mi) => {
 // 怪物 / BOSS 生成
 function bossHome(mi) {
   if (mi === 3) return { x: G.SCHOOL.room707.x, y: G.SCHOOL.room707.y };
-  return { x: G.TOWN.plaza.x, y: G.TOWN.plaza.y };
+  const a = G.MAPS[mi].bossArena;
+  return a ? { x: a.x, y: a.y } : { x: G.TOWN.plaza.x, y: G.TOWN.plaza.y };
 }
 function spawnMob(mapId, kind, isBoss) {
   const md = G.MOBS[kind];
@@ -337,7 +356,7 @@ function killMob(mapId, mob, killer) {
     send(killer.ws, { t: 'loot', gold });
   }
   if (mob.boss && killer) {
-    for (const item of bossDropItems(md.gearTier)) dropToGround(mapId, mob.x, mob.y, item);
+    for (const item of bossDropItems(md.gearTier, killer.cls)) dropToGround(mapId, mob.x, mob.y, item);
     if (md.memento && !killer.flags[mob.kind]) {
       killer.flags[mob.kind] = true;
       killer.inv.push({ uid: uid(), kind: 'memento', id: md.memento.id, name: md.memento.name, desc: md.memento.desc, untradeable: true });
@@ -359,6 +378,7 @@ function killMob(mapId, mob, killer) {
 function damageMob(mapId, mob, dmg, attacker, opts) {
   if (mob.dead) return;
   mob.hp -= dmg;
+  mob.lastFight = now();
   ev(mapId, 'dmg', { x: mob.x, y: mob.y - 20, val: Math.floor(dmg), crit: (opts && opts.crit) || false, mob: mob.uid });
   if (mob.hp <= 0) killMob(mapId, mob, attacker);
 }
@@ -414,7 +434,7 @@ function spawnGuards(killer) {
   broadcastMap(mapId, { t: 'announce', msg: `🛡 ${killer.name} 在城鎮中行兇，士兵出動追殺！` });
 }
 
-/* ---- 對區域內所有敵人造成傷害（技能用） ---- */
+/* ---- 對區域內所有敵人造成傷害（技能用，隔牆無效） ---- */
 function hitArea(p, cx, cy, radius, dmg, opts) {
   const w = world[p.mapId];
   let hit = 0;
@@ -422,12 +442,14 @@ function hitArea(p, cx, cy, radius, dmg, opts) {
     if (mob.dead) continue;
     const r = radius + G.MOBS[mob.kind].size * 0.6;
     if (dist2(cx, cy, mob.x, mob.y) > r * r) continue;
+    if (!G.hasLOS(p.mapId, cx, cy, mob.x, mob.y)) continue;
     damageMob(p.mapId, mob, dmg * rnd(0.9, 1.1), p, opts);
     if (opts && opts.poison) mob.poison = { left: opts.poison.ticks, dmg: opts.poison.dmg, owner: p.id, nextAt: now() + 1000 };
     hit++;
   }
   for (const g of [...w.guards]) {
     if (dist2(cx, cy, g.x, g.y) > (radius + 30) ** 2) continue;
+    if (!G.hasLOS(p.mapId, cx, cy, g.x, g.y)) continue;
     g.hp -= dmg; ev(p.mapId, 'dmg', { x: g.x, y: g.y - 25, val: Math.floor(dmg) });
     if (g.hp <= 0) w.guards.splice(w.guards.indexOf(g), 1);
     hit++;
@@ -436,6 +458,7 @@ function hitArea(p, cx, cy, radius, dmg, opts) {
     const q = ws2.player;
     if (!q || q === p || q.mapId !== p.mapId || q.dead) continue;
     if (dist2(cx, cy, q.x, q.y) > (radius + 26) ** 2) continue;
+    if (!G.hasLOS(p.mapId, cx, cy, q.x, q.y)) continue;
     damagePlayer(q, dmg, { type: 'player', ref: p });
     hit++;
   }
@@ -468,7 +491,7 @@ function playerAttack(p, aim) {
     });
     return;
   }
-  // 近戰扇形
+  // 近戰扇形（隔牆無效）
   const w = world[p.mapId];
   for (const mob of w.mobs) {
     if (mob.dead) continue;
@@ -477,10 +500,12 @@ function playerAttack(p, aim) {
     const ma = Math.atan2(mob.y - p.y, mob.x - p.x);
     let da = Math.abs(ma - ang); if (da > Math.PI) da = Math.PI * 2 - da;
     if (da > c.arc / 2 + 0.35) continue;
+    if (!G.hasLOS(p.mapId, p.x, p.y, mob.x, mob.y)) continue;
     damageMob(p.mapId, mob, dmg, p, { crit });
   }
   for (const g of [...w.guards]) {
     if (dist2(p.x, p.y, g.x, g.y) > (c.range + 30) ** 2) continue;
+    if (!G.hasLOS(p.mapId, p.x, p.y, g.x, g.y)) continue;
     g.hp -= dmg; ev(p.mapId, 'dmg', { x: g.x, y: g.y - 25, val: Math.floor(dmg), crit });
     if (g.hp <= 0) w.guards.splice(w.guards.indexOf(g), 1);
   }
@@ -491,6 +516,7 @@ function playerAttack(p, aim) {
     const ma = Math.atan2(q.y - p.y, q.x - p.x);
     let da = Math.abs(ma - ang); if (da > Math.PI) da = Math.PI * 2 - da;
     if (da > c.arc / 2 + 0.35) continue;
+    if (!G.hasLOS(p.mapId, p.x, p.y, q.x, q.y)) continue;
     damagePlayer(q, dmg, { type: 'player', ref: p });
   }
 }
@@ -578,6 +604,7 @@ function castSkill(p, idx, aim) {
         const ma = Math.atan2(mob.y - p.y, mob.x - p.x);
         let da = Math.abs(ma - ang); if (da > Math.PI) da = Math.PI * 2 - da;
         if (da > sk.arc / 2) continue;
+        if (!G.hasLOS(p.mapId, p.x, p.y, mob.x, mob.y)) continue;
         damageMob(p.mapId, mob, base * rnd(0.9, 1.1), p);
         mob.poison = { left: poison.ticks, dmg: poison.dmg, owner: p.id, nextAt: now() + 1000 };
       }
@@ -588,6 +615,7 @@ function castSkill(p, idx, aim) {
         const ma = Math.atan2(q.y - p.y, q.x - p.x);
         let da = Math.abs(ma - ang); if (da > Math.PI) da = Math.PI * 2 - da;
         if (da > sk.arc / 2) continue;
+        if (!G.hasLOS(p.mapId, p.x, p.y, q.x, q.y)) continue;
         damagePlayer(q, base, { type: 'player', ref: p });
       }
       break;
@@ -963,13 +991,13 @@ setInterval(() => {
         if (mob.dead) continue;
       }
       let target = null, bd = Infinity;
-      const aggro = mob.boss ? 340 : 220;
+      const aggro = mob.boss ? 360 : 220;
       for (const ws of sockets) {
         const p = ws.player;
         if (!p || p.dead || p.mapId !== mapId) continue;
         if (mob.boss) {
-          // BOSS 只守衛自己的大空間（城鎮 BOSS 廣場 / 707 班）
-          if (dist2(p.x, p.y, mob.hx, mob.hy) > 340 * 340) continue;
+          // BOSS 只守衛自己的領地
+          if (dist2(p.x, p.y, mob.hx, mob.hy) > 380 * 380) continue;
         } else if (inTown(mapId, p.x, p.y)) continue;
         const dd = dist2(mob.x, mob.y, p.x, p.y);
         if (dd < aggro * aggro && dd < bd) { bd = dd; target = p; }
@@ -986,6 +1014,7 @@ setInterval(() => {
           mob.x = r.x; mob.y = r.y;
         } else if (t - mob.atkAt > (mob.boss ? 1300 : 1100)) {
           mob.atkAt = t;
+          mob.lastFight = t;
           damagePlayer(target, mob.atk, { type: 'mob', ref: mob });
         }
         mob.dir = target.x > mob.x ? 1 : -1;
@@ -1005,6 +1034,13 @@ setInterval(() => {
           mob.dir = mob.wx > mob.x ? 1 : -1;
         }
         if (mob.hp < mob.maxHp) mob.hp = Math.min(mob.maxHp, mob.hp + mob.maxHp * 0.003);
+      }
+      // BOSS 脫戰 5 秒後快速回血（每秒 12%）
+      if (mob.boss && mob.hp < mob.maxHp && t - (mob.lastFight || 0) > 5000) {
+        mob.hp = Math.min(mob.maxHp, mob.hp + mob.maxHp * 0.012);
+        if (!mob.regenNotified) { mob.regenNotified = true; ev(mapId, 'regen', { uid: mob.uid }); }
+      } else if (mob.regenNotified && t - (mob.lastFight || 0) <= 5000) {
+        mob.regenNotified = false;
       }
     }
     // ---- 士兵 AI ----
@@ -1105,9 +1141,13 @@ setInterval(() => {
     }
     const mobs = w.mobs.filter((m) => !m.dead).map((m) => ({
       uid: m.uid, kind: m.kind, x: Math.round(m.x), y: Math.round(m.y),
-      hp: Math.ceil(m.hp), maxHp: m.maxHp, dir: m.dir, boss: m.boss, po: m.poison ? 1 : 0
+      hp: Math.ceil(m.hp), maxHp: m.maxHp, dir: m.dir, boss: m.boss, po: m.poison ? 1 : 0,
+      rg: (m.boss && m.hp < m.maxHp && t - (m.lastFight || 0) > 5000) ? 1 : 0
     }));
-    const drops = w.drops.map((d) => ({ uid: d.uid, x: Math.round(d.x), y: Math.round(d.y), q: d.item.q || 0, name: d.item.name }));
+    const drops = w.drops.map((d) => ({
+      uid: d.uid, x: Math.round(d.x), y: Math.round(d.y), q: d.item.q || 0, name: d.item.name,
+      tier: d.item.tier, slot: d.item.slot, cls: d.item.cls, plus: d.item.plus || 0
+    }));
     const guards = w.guards.map((g) => ({ uid: g.uid, x: Math.round(g.x), y: Math.round(g.y), dir: g.dir, hp: Math.ceil(g.hp), maxHp: g.maxHp }));
     const projectiles = w.projectiles.map((pr) => ({ uid: pr.uid, x: Math.round(pr.x), y: Math.round(pr.y), vx: pr.vx, vy: pr.vy, bomb: pr.bomb ? 1 : 0 }));
     const chests = w.chests.map((c) => ({ id: c.id, x: Math.round(c.x), y: Math.round(c.y), open: !!c.openAt }));
@@ -1125,4 +1165,17 @@ setInterval(() => { for (const ws of sockets) if (ws.player) persist(ws); }, 300
 
 initStore()
   .then(() => server.listen(PORT, () => console.log(`龍領主 Online 伺服器已啟動： http://localhost:${PORT}`)))
-  .catch((e) => { console.error('資料庫連線失敗：', e.message); console.error('請檢查 DATABASE_URL 是否正確'); process.exit(1); });
+  .catch((e) => {
+    console.error('資料庫連線失敗：', e.message);
+    const m = e.message || '';
+    if (/password authentication failed/i.test(m)) {
+      console.error('→ 密碼錯誤。到 Supabase：Settings → Database → Reset database password 重設一組');
+      console.error('   （只用英數字，避開 @ : / # ? 等符號），再把新密碼填回連線字串。');
+    } else if (/Tenant or user not found/i.test(m)) {
+      console.error('→ 使用者名稱有誤。Supabase Session pooler 的使用者應為 postgres.專案代號');
+    } else if (/ENETUNREACH|ETIMEDOUT|EAI_AGAIN/i.test(m)) {
+      console.error('→ 連不到主機。請改用 Supabase 的 Session pooler 連線字串（主機含 pooler.supabase.com）');
+    }
+    console.error('請檢查 DATABASE_URL 是否正確');
+    process.exit(1);
+  });

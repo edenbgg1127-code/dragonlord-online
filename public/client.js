@@ -372,6 +372,7 @@ function handleEvent(m) {
     case 'dmg':
       effects.push({ type: 'num', x: m.x + (Math.random() * 30 - 15), y: m.y, val: m.val, crit: m.crit, ply: m.ply, t0: t });
       if (m.mob) mobFlash[m.mob] = t;
+      if (m.ply) markCombat(m.ply);
       if (m.ply === myId) { shake(7); SND.hurt(); } else SND[m.crit ? 'crit' : 'hit']();
       break;
     case 'atk':
@@ -393,18 +394,21 @@ function handleEvent(m) {
     case 'pick': effects.push({ type: 'spark', x: m.x, y: m.y, t0: t }); SND.pick(); break;
     case 'chestOpen': break;
     case 'whirl':
+      markCombat(m.id);
       effects.push({ type: 'whirl', id: m.id, r: m.r, t0: t });
       effects.push({ type: 'shock', id: m.id, r: m.r, t0: t, col: '#ffe27a' });
       spawnParticles(m, 22, '#ffd76e', 260);
       if (m.id === myId) shake(9);
       SND.skill(); break;
     case 'dash':
+      markCombat(m.id);
       effects.push({ type: 'trail', x0: m.x0, y0: m.y0, x1: m.x1, y1: m.y1, t0: t, col: '#ffd76e' });
       effects.push({ type: 'ghost', id: m.id, x0: m.x0, y0: m.y0, x1: m.x1, y1: m.y1, t0: t, col: '#ffd76e' });
       effects.push({ type: 'shock', x: m.x1, y: m.y1, r: 120, t0: t, col: '#ffb35a' });
       if (m.id === myId) shake(10);
       SND.skill(); break;
     case 'blink':
+      markCombat(m.id);
       effects.push({ type: 'trail', x0: m.x0, y0: m.y0, x1: m.x1, y1: m.y1, t0: t, col: '#b58aff' });
       effects.push({ type: 'ghost', id: m.id, x0: m.x0, y0: m.y0, x1: m.x1, y1: m.y1, t0: t, col: '#b58aff' });
       effects.push({ type: 'shock', x: m.x1, y: m.y1, r: 110, t0: t, col: '#c9a2ff' });
@@ -412,6 +416,7 @@ function handleEvent(m) {
       if (m.id === myId) shake(8);
       SND.skill(); break;
     case 'cone':
+      markCombat(m.id);
       effects.push({ type: 'cone', id: m.id, ang: m.ang, r: m.r, t0: t });
       effects.push({ type: 'poisoncloud', id: m.id, ang: m.ang, r: m.r, t0: t });
       SND.skill(); break;
@@ -498,7 +503,8 @@ function sendMove(adx, ady) {
   if (keys['s'] || keys['arrowdown']) dy += 1;
   if (keys['a'] || keys['arrowleft']) dx -= 1;
   if (keys['d'] || keys['arrowright']) dx += 1;
-  if (!dx && !dy && typeof touchDir !== 'undefined') {   // 手機方向鍵
+  if (!dx && !dy && typeof joy !== 'undefined' && joy.active) { dx = joy.vx; dy = joy.vy; }
+  if (!dx && !dy && typeof touchDir !== 'undefined') {   // 桌機點方向鍵
     dx = (touchDir.right ? 1 : 0) - (touchDir.left ? 1 : 0);
     dy = (touchDir.down ? 1 : 0) - (touchDir.up ? 1 : 0);
   }
@@ -572,61 +578,127 @@ function castSkill(i, useMouse) {
   me.dir = aim.x >= 0 ? 1 : -1;
 }
 
-/* ---------------- 手機虛擬方向鍵 ---------------- */
+/* ---------------- 手機浮動虛擬搖桿（以手指落點為圓心） ---------------- */
 const dpad = $('#dpad');
-const touchDir = { up: 0, down: 0, left: 0, right: 0 };
+const touchDir = { up: 0, down: 0, left: 0, right: 0 };   // 桌機用方向鍵
+const joy = { id: null, ox: 0, oy: 0, vx: 0, vy: 0, active: false };
+
+function idlePos() {
+  const m = 18;
+  return { x: m + dpad.offsetWidth / 2, y: innerHeight - m - dpad.offsetHeight / 2 };
+}
+function placeDpad(x, y) { dpad.style.left = x + 'px'; dpad.style.top = y + 'px'; }
+function resetDpad() {
+  const p0 = idlePos();
+  placeDpad(p0.x, p0.y);
+  dpad.classList.remove('act');
+  $$('#dpad .dk[data-dir]').forEach((k) => k.classList.remove('on'));
+  dpad.style.setProperty('--tx', '0px'); dpad.style.setProperty('--ty', '0px');
+}
+addEventListener('resize', resetDpad);
+setTimeout(resetDpad, 60);
+
 function dpadVec() {
-  let dx = (touchDir.right ? 1 : 0) - (touchDir.left ? 1 : 0);
-  let dy = (touchDir.down ? 1 : 0) - (touchDir.up ? 1 : 0);
+  if (joy.active && (joy.vx || joy.vy)) return { x: joy.vx, y: joy.vy };
+  const dx = (touchDir.right ? 1 : 0) - (touchDir.left ? 1 : 0);
+  const dy = (touchDir.down ? 1 : 0) - (touchDir.up ? 1 : 0);
   return (dx || dy) ? { x: dx, y: dy } : null;
+}
+function highlightDirs(vx, vy) {
+  const on = { up: vy < -0.35, down: vy > 0.35, left: vx < -0.35, right: vx > 0.35 };
+  $$('#dpad .dk[data-dir]').forEach((k) => k.classList.toggle('on', !!on[k.dataset.dir]));
 }
 function applyDpad() {
   const v = dpadVec();
-  dpad.classList.toggle('act', !!v);
-  $$('#dpad .dk[data-dir]').forEach((k) => k.classList.toggle('on', !!touchDir[k.dataset.dir]));
   if (v) sendMove(v.x, v.y);
-  else { for (const k in touchDir) touchDir[k] = 0; sendMove(); }
+  else sendMove();
 }
-// 支援滑動（手指在方向鍵上移動可切換方向）
-function updateFromTouches(ev) {
-  for (const k in touchDir) touchDir[k] = 0;
-  const r = dpad.getBoundingClientRect();
-  for (const t of ev.touches) {
-    if (t.clientX < r.left - 40 || t.clientX > r.right + 40 || t.clientY < r.top - 40 || t.clientY > r.bottom + 40) continue;
-    const nx = (t.clientX - r.left) / r.width - 0.5, ny = (t.clientY - r.top) / r.height - 0.5;
-    if (Math.hypot(nx, ny) < 0.14) continue;   // 中心死區
-    if (Math.abs(nx) > 0.16) touchDir[nx > 0 ? 'right' : 'left'] = 1;
-    if (Math.abs(ny) > 0.16) touchDir[ny > 0 ? 'down' : 'up'] = 1;
+/* 判斷觸控是否落在搖桿感應區（左半螢幕下方，且不在按鈕上） */
+function isJoyZone(t) {
+  if (t.clientX > innerWidth * 0.52) return false;
+  if (t.clientY < innerHeight * 0.30) return false;
+  const el = document.elementFromPoint(t.clientX, t.clientY);
+  if (el && el.closest('#combat,#actionbar,.panel,#helpbtn,#minimap,.screen,#chatbox')) return false;
+  return true;
+}
+function joyStart(t) {
+  joy.id = t.identifier; joy.ox = t.clientX; joy.oy = t.clientY;
+  joy.vx = joy.vy = 0; joy.active = true;
+  placeDpad(t.clientX, t.clientY);
+  dpad.classList.add('act');
+  highlightDirs(0, 0);
+}
+function joyMove(t) {
+  const R = Math.max(34, dpad.offsetWidth * 0.42);
+  let dx = t.clientX - joy.ox, dy = t.clientY - joy.oy;
+  const len = Math.hypot(dx, dy);
+  if (len < 14) { joy.vx = joy.vy = 0; highlightDirs(0, 0); dpad.style.setProperty('--tx', '0px'); dpad.style.setProperty('--ty', '0px'); applyDpad(); return; }
+  const k = Math.min(1, len / R);
+  joy.vx = (dx / len) * k; joy.vy = (dy / len) * k;
+  // 拇指拉太遠時搖桿跟著移動（避免手指跑出感應範圍）
+  if (len > R * 1.6) {
+    joy.ox += dx - (dx / len) * R * 1.6;
+    joy.oy += dy - (dy / len) * R * 1.6;
+    placeDpad(joy.ox, joy.oy);
+    dx = t.clientX - joy.ox; dy = t.clientY - joy.oy;
   }
+  const cl = Math.min(len, R);
+  dpad.style.setProperty('--tx', (dx / len) * cl + 'px');
+  dpad.style.setProperty('--ty', (dy / len) * cl + 'px');
+  highlightDirs(joy.vx, joy.vy);
   applyDpad();
 }
-['touchstart', 'touchmove'].forEach((evt) =>
-  dpad.addEventListener(evt, (e) => { e.preventDefault(); ac(); updateFromTouches(e); }, { passive: false }));
-['touchend', 'touchcancel'].forEach((evt) =>
-  dpad.addEventListener(evt, (e) => { e.preventDefault(); updateFromTouches(e); }, { passive: false }));
+function joyEnd() {
+  joy.id = null; joy.active = false; joy.vx = joy.vy = 0;
+  resetDpad(); applyDpad();
+}
+document.addEventListener('touchstart', (e) => {
+  if (!myId) return;
+  for (const t of e.changedTouches) {
+    if (joy.id === null && isJoyZone(t)) { ac(); joyStart(t); e.preventDefault(); }
+  }
+}, { passive: false });
+document.addEventListener('touchmove', (e) => {
+  for (const t of e.changedTouches) if (t.identifier === joy.id) { joyMove(t); e.preventDefault(); }
+}, { passive: false });
+['touchend', 'touchcancel'].forEach((evt) => document.addEventListener(evt, (e) => {
+  for (const t of e.changedTouches) if (t.identifier === joy.id) joyEnd();
+}, { passive: true }));
+
 // 桌機也可用滑鼠按方向鍵
 $$('#dpad .dk[data-dir]').forEach((k) => {
-  k.addEventListener('mousedown', (e) => { e.preventDefault(); touchDir[k.dataset.dir] = 1; applyDpad(); });
+  k.addEventListener('mousedown', (e) => { e.preventDefault(); touchDir[k.dataset.dir] = 1; highlightDirs(
+    (touchDir.right ? 1 : 0) - (touchDir.left ? 1 : 0), (touchDir.down ? 1 : 0) - (touchDir.up ? 1 : 0)); applyDpad(); });
 });
-addEventListener('mouseup', () => { if (dpadVec()) { for (const k in touchDir) touchDir[k] = 0; applyDpad(); } });
+addEventListener('mouseup', () => {
+  if (touchDir.up || touchDir.down || touchDir.left || touchDir.right) {
+    for (const k in touchDir) touchDir[k] = 0;
+    highlightDirs(0, 0); applyDpad();
+  }
+});
 
-/* 觸控攻擊：點畫面空白處＝朝該方向攻擊 */
+/* 觸控攻擊：右半螢幕點擊＝朝該方向攻擊 */
 cv.addEventListener('touchstart', (e) => {
   ac();
   if (!myId || dead || !e.touches.length) return;
-  const t = e.touches[0];
-  const wx = camX + t.clientX / viewScale, wy = camY + t.clientY / viewScale;
-  if (stCur) for (const d of stCur.drops) {
-    if ((d.x - wx) ** 2 + (d.y - wy) ** 2 < 60 * 60) { send({ t: 'pickup' }); return; }
+  for (const t of e.changedTouches) {
+    if (t.identifier === joy.id || isJoyZone(t)) continue;      // 搖桿手指不觸發攻擊
+    const wx = camX + t.clientX / viewScale, wy = camY + t.clientY / viewScale;
+    if (stCur) {
+      let picked = false;
+      for (const d of stCur.drops) {
+        if ((d.x - wx) ** 2 + (d.y - wy) ** 2 < 70 * 70) { send({ t: 'pickup' }); picked = true; break; }
+      }
+      if (picked) continue;
+    }
+    tryAttack({ x: wx - me.x, y: wy - me.y });
   }
-  tryAttack({ x: wx - me.x, y: wy - me.y });
 }, { passive: true });
-// 技能／按鈕觸控即時回饋（避免 300ms 延遲）
+// 技能／按鈕觸控即時回饋
 ['sk0', 'sk1', 'atkbtn'].forEach((id) => {
   const el = $('#' + id);
-  el.addEventListener('touchstart', (e) => { e.preventDefault(); ac(); el.click(); }, { passive: false });
+  el.addEventListener('touchstart', (e) => { e.preventDefault(); e.stopPropagation(); ac(); el.click(); }, { passive: false });
 });
-// 防止雙指縮放與長按選單
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('contextmenu', (e) => { if (e.target === cv || dpad.contains(e.target)) e.preventDefault(); });
 
@@ -704,9 +776,9 @@ function togglePanel(id, forceOpen) {
   if (!open && !forceOpen) { el.classList.add('hidden'); return; }
   ['bag', 'shop', 'gearshop', 'smith', 'help'].forEach((p) => $('#' + p).classList.add('hidden'));
   el.classList.remove('hidden');
-  if (id === 'bag') renderBag();
+  if (id === 'bag') renderBag(true);
   if (id === 'gearshop') renderGearShop();
-  if (id === 'smith') renderSmith();
+  if (id === 'smith') renderSmith(true);
 }
 $$('.x').forEach((x) => x.onclick = () => $('#' + x.dataset.close).classList.add('hidden'));
 $('#ab-bag').onclick = () => togglePanel('bag');
@@ -770,8 +842,20 @@ function bindTips(container, lookup) {
 
 /* ---- 背包 ---- */
 let selUid = null;
-function renderBag() {
+let bagSig = '';
+function bagSignature() {
+  if (!meData) return '';
+  return JSON.stringify([
+    meData.gold, meData.arrows, meData.potions, meData.scrolls, meData.keys, meData.lvl,
+    meData.inv.map((i) => i.uid + ':' + i.plus),
+    GAME.SLOTS.map((s) => (meData.equip[s] ? meData.equip[s].uid + ':' + meData.equip[s].plus : '-'))
+  ]);
+}
+function renderBag(force) {
   if (!meData) return;
+  const sig = bagSignature();
+  if (!force && sig === bagSig) return;      // 內容沒變就不重畫（避免清掉選取與說明）
+  bagSig = sig;
   $('#baginfo').innerHTML = `💰 <b style="color:var(--gold)">${meData.gold.toLocaleString()}</b>　🏹 ${meData.arrows}　🧪 ${meData.potions}　📜 ${meData.scrolls}　🔑 ${meData.keys}/${GAME.KEYS_NEEDED}　（${meData.inv.length}/40）`;
   const eq = $('#equipslots'); eq.innerHTML = '';
   GAME.SLOTS.forEach((s) => {
@@ -791,14 +875,28 @@ function renderBag() {
   for (let i = meData.inv.length; i < 24; i++) grid.insertAdjacentHTML('beforeend', '<div class="cell"></div>');
   grid.querySelectorAll('.cell[data-uid]').forEach((el) => {
     el.onclick = () => {
-      selUid = el.dataset.uid;
-      grid.querySelectorAll('.cell').forEach((c) => c.classList.remove('sel'));
-      el.classList.add('sel');
+      const uid = el.dataset.uid;
+      if (selUid === uid) { send({ t: 'equip', uid }); return; }  // 再點一次＝裝備
+      selUid = uid;
+      refreshSelection();
     };
-    el.ondblclick = () => send({ t: 'equip', uid: el.dataset.uid });
   });
   bindTips(grid, (u) => meData.inv.find((i) => i.uid === u));
+  refreshSelection();
   drawDoll();
+}
+function refreshSelection() {
+  const grid = $('#invgrid');
+  grid.querySelectorAll('.cell').forEach((c2) => c2.classList.remove('sel'));
+  const el = selUid && grid.querySelector(`.cell[data-uid="${selUid}"]`);
+  if (el) el.classList.add('sel');
+  const it = selUid && meData && meData.inv.find((i) => i.uid === selUid);
+  const btn = $('#btn-equip');
+  if (it && it.kind === 'equip') {
+    const bad = it.slot === 'weapon' && it.cls !== myCls;
+    btn.textContent = bad ? '🚫 此職業不可裝備' : '裝備【' + it.name + '】';
+    btn.disabled = bad;
+  } else { btn.textContent = '裝備'; btn.disabled = !it; }
 }
 $('#btn-equip').onclick = () => { if (selUid) send({ t: 'equip', uid: selUid }); };
 $('#btn-drop').onclick = () => { if (selUid) send({ t: 'drop', uid: selUid }); };
@@ -824,8 +922,12 @@ function renderGearShop() {
 
 /* ---- 鐵匠鋪 ---- */
 let enhUid = null;
-function renderSmith() {
+let smithSig = '';
+function renderSmith(force) {
   if (!meData) return;
+  const sig = bagSignature();
+  if (!force && sig === smithSig) return;
+  smithSig = sig;
   $('#scrolln').textContent = meData.scrolls;
   const grid = $('#smithgrid'); grid.innerHTML = '';
   const all = [];
@@ -836,7 +938,7 @@ function renderSmith() {
     if (all[i]._eq) el.style.boxShadow = 'inset 0 0 0 2px #5ecfbb66';
     el.onclick = () => {
       enhUid = el.dataset.uid;
-      grid.querySelectorAll('.cell').forEach((c) => c.classList.remove('sel'));
+      grid.querySelectorAll('.cell').forEach((c2) => c2.classList.remove('sel'));
       el.classList.add('sel');
       const it = all.find((x) => x.uid === enhUid);
       const rate = it.plus < 10 ? (GAME.ENHANCE_RATES[it.plus] * 100) : 0;
@@ -1958,7 +2060,11 @@ function drawSchool(x2, R) {
 /* ---------------- 攻擊動作 ---------------- */
 const swings = {};            // id → { t0, ang }
 const SWING_MS = 300;
-function startSwing(id, ang) { swings[id] = { t0: performance.now(), ang }; }
+const combatUntil = {};       // id → 何時脫離戰鬥（脫戰後收起武器）
+const COMBAT_MS = 4000;
+function startSwing(id, ang) { swings[id] = { t0: performance.now(), ang }; markCombat(id); }
+function markCombat(id) { if (id) combatUntil[id] = performance.now() + COMBAT_MS; }
+function inCombat(id) { return !!(id && combatUntil[id] > performance.now()); }
 
 /* 揮舞中的武器（依職業畫出不同兵器） */
 function drawSwingWeapon(g, cls, w2, h, prog, dir, qcol, tier) {
@@ -2000,8 +2106,45 @@ function drawSwingWeapon(g, cls, w2, h, prog, dir, qcol, tier) {
   g.restore();
 }
 
+/* 非戰鬥時把武器收在背上／腰間 */
+function drawSheathed(g, wv, w2, h, dir, cls) {
+  const P = GEAR_PAL[wv[0]];
+  g.save();
+  if (cls === 'archer') {                       // 弓背在背後
+    g.translate(-dir * w2 * 0.12, -h * 0.52);
+    g.rotate(dir * 0.55);
+    g.strokeStyle = P.dark; g.lineWidth = 4;
+    g.beginPath(); g.arc(0, 0, h * 0.19, -1.9, 1.9); g.stroke();
+    g.strokeStyle = P.main; g.lineWidth = 2.2;
+    g.beginPath(); g.arc(0, 0, h * 0.19, -1.9, 1.9); g.stroke();
+    g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(Math.cos(-1.9) * h * 0.19, Math.sin(-1.9) * h * 0.19);
+    g.lineTo(Math.cos(1.9) * h * 0.19, Math.sin(1.9) * h * 0.19); g.stroke();
+  } else if (cls === 'assassin') {              // 匕首插在腰間
+    g.translate(-dir * w2 * 0.20, -h * 0.42);
+    g.rotate(dir * 1.15);
+    g.fillStyle = '#2f333c'; g.fillRect(-2.5, -2, 5, 7);
+    g.fillStyle = P.main;
+    g.beginPath(); g.moveTo(-2.5, -3); g.lineTo(-1.6, -h * 0.15); g.lineTo(0, -h * 0.17);
+    g.lineTo(1.6, -h * 0.15); g.lineTo(2.5, -3); g.closePath(); g.fill();
+  } else {                                      // 長劍斜背在背上
+    g.translate(-dir * w2 * 0.10, -h * 0.50);
+    g.rotate(dir * -0.72);
+    g.fillStyle = '#3a2a18'; g.fillRect(-3, 0, 6, 9);         // 握把
+    g.fillStyle = P.trim; g.fillRect(-6, -3, 12, 4);          // 護手
+    const gs = g.createLinearGradient(0, 0, 0, -h * 0.34);
+    gs.addColorStop(0, P.main); gs.addColorStop(1, P.light);
+    g.fillStyle = gs;
+    g.beginPath(); g.moveTo(-3, -3); g.lineTo(-2, -h * 0.32); g.lineTo(0, -h * 0.36);
+    g.lineTo(2, -h * 0.32); g.lineTo(3, -3); g.closePath(); g.fill();
+    g.strokeStyle = 'rgba(0,0,0,.35)'; g.lineWidth = 1; g.stroke();
+  }
+  g.restore();
+}
+
 /* ---------------- 紙娃娃：把裝備畫在身上 ---------------- */
-function drawGearOnBody(g, vis, w2, h, dir, cls, hideWeapon) {
+function drawGearOnBody(g, vis, w2, h, dir, cls, hideWeapon, armed) {
   const now2 = performance.now();
   const piece = (v) => ({ P: GEAR_PAL[v[0]], q: v[1], plus: v[2], tier: v[0] });
   // 護腿
@@ -2081,6 +2224,7 @@ function drawGearOnBody(g, vis, w2, h, dir, cls, hideWeapon) {
   // 武器（未揮舞時掛在手上）
   if (vis.weapon && !hideWeapon) {
     const { P, q, plus, tier } = piece(vis.weapon);
+    if (armed === false) { drawSheathed(g, vis.weapon, w2, h, dir, cls); } else {
     const hx = dir * w2 * 0.34, hy = -h * 0.50;
     g.save(); g.translate(hx, hy); g.rotate(dir * 0.5);
     if (cls === 'archer') {
@@ -2101,6 +2245,7 @@ function drawGearOnBody(g, vis, w2, h, dir, cls, hideWeapon) {
       if (tier >= 3) { g.fillStyle = P.gem; g.beginPath(); g.arc(0, 2, 2.2, 0, TAU); g.fill(); }
     }
     g.restore();
+    }
     if (plus >= 7) {                                              // 高強化光環
       g.strokeStyle = QCOLOR(q); g.globalAlpha = 0.35 + Math.sin(now2 / 180) * 0.22;
       g.lineWidth = 2; g.beginPath(); g.ellipse(0, -h * 0.06, w2 * 0.5, h * 0.07, 0, 0, TAU); g.stroke();
@@ -2156,7 +2301,7 @@ function drawChar(g, cls, x, y, h, dir, vis, hpRatio, name, lvl, deadFlag, wante
   g.scale(dir, 1);
   g.drawImage(img, -w2 / 2, -h, w2, h);
   g.scale(dir, 1);
-  if (vis) drawGearOnBody(g, vis, w2, h, dir, cls, !!sw);
+  if (vis) drawGearOnBody(g, vis, w2, h, dir, cls, !!sw, swingId ? inCombat(swingId) : true);
   // 揮舞的武器（畫在最上層）
   if (sw) {
     const wq = vis && vis.weapon ? QCOLOR(vis.weapon[1]) : '#ffffff';

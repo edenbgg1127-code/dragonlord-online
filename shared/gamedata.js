@@ -118,11 +118,13 @@
       mobs: ['slime', 'goblin'], boss: 'golem',
       townName: '白霜城', chestN: 6,
       landmark: { x: 2160, y: 560, r: 190, name: '符文祭壇' },
+      bossArena: { x: 2960, y: 2010, r: 260, name: '魔像深谷' },
       portalPrev: null, portalNext: { x: 3180, y: 1180 } },
     { id: 1, name: '黑暗聖殿（建議 50-150 級）', theme: 'sanctum', w: 3400, h: 2400,
       mobs: ['bat', 'spider'], boss: 'cultist',
       townName: '暗影堡', chestN: 6,
       landmark: { x: 2160, y: 560, r: 190, name: '魔法祭壇' },
+      bossArena: { x: 2960, y: 2010, r: 260, name: '黑暗聖所' },
       portalPrev: { x: 180, y: 1180 }, portalNext: { x: 3180, y: 1180 } },
     { id: 2, name: '火山王座（建議 150-300 級）', theme: 'volcano', w: 3400, h: 2400,
       mobs: ['imp', 'skeleton'], boss: null,
@@ -269,6 +271,7 @@
       if (md.portalNext) clear(md.portalNext.x, md.portalNext.y, 4);
       if (md.centerPortal) clear(md.centerPortal.x, md.centerPortal.y, 5);
       if (md.landmark) clear(md.landmark.x, md.landmark.y, Math.ceil(md.landmark.r / TILE) + 1);
+      if (md.bossArena) clear(md.bossArena.x, md.bossArena.y, Math.ceil(md.bossArena.r / TILE) + 1);
       // 外框
       for (let x = 0; x < tw; x++) { g[at(x, 0)] = 1; g[at(x, 1)] = 1; g[at(x, th - 1)] = 1; g[at(x, th - 2)] = 1; }
       for (let y = 0; y < th; y++) { g[at(0, y)] = 1; g[at(1, y)] = 1; g[at(tw - 1, y)] = 1; g[at(tw - 2, y)] = 1; }
@@ -304,6 +307,18 @@
     const { g, tw } = getGrid(mi);
     return g[Math.floor(py / TILE) * tw + Math.floor(px / TILE)] === 1;
   }
+  // 視線判定：兩點之間有牆就擋住（攻擊不能穿牆）
+  function hasLOS(mi, x0, y0, x1, y1) {
+    const dx = x1 - x0, dy = y1 - y0;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1) return true;
+    const steps = Math.ceil(dist / (TILE * 0.5));
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      if (blockedAt(mi, x0 + dx * t, y0 + dy * t)) return false;
+    }
+    return true;
+  }
   function inTownRect(mi, x, y) {
     if (mi >= 3 || !MAPS[mi]) return false;
     const T = TOWN;
@@ -323,7 +338,7 @@
     ENHANCE_RATES, ENHANCE_BONUS, SCROLL_PRICE, POTION_PRICE, ARROW_PRICE, INN_PRICE, POTION_CD, POTION_HEAL,
     mobHP, mobATK, MOBS, MOB_RESPAWN, XP_MUL_MINI, XP_MUL_GRAND, MOB_COUNT_EACH,
     TILE, MAPS, TOWN, SCHOOL, KEYS_NEEDED, KEY_CHANCE, KEY_PITY, KEY_NAME,
-    mulberry32, getGrid, blockedAt, inTownRect,
+    mulberry32, getGrid, blockedAt, hasLOS, inTownRect,
     PVP_DROP_CHANCE, PVP_LEVEL_RANGE, GUARD_COUNT, GUARD_DURATION, CHEST_RESPAWN
   };
 });

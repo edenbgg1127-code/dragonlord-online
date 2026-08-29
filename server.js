@@ -253,8 +253,35 @@ world.forEach((w, mi) => {
 /* ---------------- 連線 ---------------- */
 const app = express();
 app.set('trust proxy', true);
-app.use(express.static(path.join(__dirname, 'public')));
-app.use('/shared', express.static(path.join(__dirname, 'shared')));
+
+/* ---- 版本標記：讓瀏覽器每次更新後自動抓到新檔案（解決手機快取舊版） ---- */
+function buildTag() {
+  const h = crypto.createHash('md5');
+  for (const f of ['public/client.js', 'public/index.html', 'shared/gamedata.js']) {
+    try { h.update(String(fs.statSync(path.join(__dirname, f)).mtimeMs)); } catch (e) {}
+  }
+  return h.digest('hex').slice(0, 8);
+}
+const BUILD = buildTag();
+console.log('遊戲版本（build）：' + BUILD);
+
+app.get(['/', '/index.html'], (req, res) => {
+  let html;
+  try { html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8'); }
+  catch (e) { return res.status(500).send('index.html 讀取失敗'); }
+  res.set('Cache-Control', 'no-store, must-revalidate');
+  res.type('html').send(html.replace(/__V__/g, BUILD));
+});
+app.get('/version', (req, res) => res.json({ build: BUILD }));
+
+const staticOpts = {
+  setHeaders(res, filePath) {
+    if (/\.(js|css|html)$/i.test(filePath)) res.set('Cache-Control', 'no-cache');
+    else res.set('Cache-Control', 'public, max-age=86400');
+  }
+};
+app.use(express.static(path.join(__dirname, 'public'), staticOpts));
+app.use('/shared', express.static(path.join(__dirname, 'shared'), staticOpts));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, maxPayload: 16 * 1024 });
 

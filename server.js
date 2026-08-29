@@ -15,21 +15,73 @@ const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 
-/* ---------------- 資料庫（JSON 檔） ---------------- */
+/* ---------------- 資料庫 ----------------
+   預設存在本機 data/db.json。
+   若設定環境變數 DATABASE_URL（免費的 Neon / Supabase 等 Postgres），
+   進度改存雲端資料庫 → Render 免費方案重新部署也不會遺失！ */
+const DATABASE_URL = process.env.DATABASE_URL;
+let pgClient = null;
 let db = { accounts: {}, guests: {} };
-try {
-  if (fs.existsSync(DB_FILE)) db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-} catch (e) { console.error('讀取存檔失敗，使用空資料庫', e); }
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+function loadFromFile() {
+  try {
+    if (fs.existsSync(DB_FILE)) db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+  } catch (e) { console.error('讀取存檔失敗，使用空資料庫', e); }
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+async function initStore() {
+  if (DATABASE_URL) {
+    const { Pool } = require('pg');
+    const needSSL = !/localhost|127\.0\.0\.1/.test(DATABASE_URL);
+    // 用連線池：閒置斷線會自動重連（Supabase / Neon 都會在閒置時斷開）
+    pgClient = new Pool({
+      connectionString: DATABASE_URL,
+      ssl: needSSL ? { rejectUnauthorized: false } : false,
+      max: 3, idleTimeoutMillis: 30000, connectionTimeoutMillis: 15000
+    });
+    pgClient.on('error', (e) => console.error('資料庫連線中斷（將自動重連）：', e.message));
+    await pgClient.query('CREATE TABLE IF NOT EXISTS savegame (id INT PRIMARY KEY, data TEXT NOT NULL)');
+    const r = await pgClient.query('SELECT data FROM savegame WHERE id = 1');
+    if (r.rows.length) {
+      try { db = JSON.parse(r.rows[0].data); } catch (e) { console.error('雲端存檔解析失敗，使用空資料庫', e); }
+    }
+    console.log('✔ 已連接雲端資料庫（DATABASE_URL），玩家進度將永久保存');
+  } else {
+    loadFromFile();
+    console.log('ℹ 使用本機檔案存檔 data/db.json（想永久保存進度可設定 DATABASE_URL，見 README）');
+  }
+}
 
 let dbDirty = false;
 function saveDB() {
   if (!dbDirty) return;
   dbDirty = false;
-  fs.writeFile(DB_FILE, JSON.stringify(db), (e) => { if (e) console.error('存檔失敗', e); });
+  if (pgClient) {
+    pgClient.query(
+      'INSERT INTO savegame (id, data) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET data = $1',
+      [JSON.stringify(db)]
+    ).catch((e) => { console.error('雲端存檔失敗', e.message); dbDirty = true; });
+  } else {
+    fs.writeFile(DB_FILE, JSON.stringify(db), (e) => { if (e) console.error('存檔失敗', e); });
+  }
 }
 setInterval(saveDB, 15000);
-function flushExit() { try { fs.writeFileSync(DB_FILE, JSON.stringify(db)); } catch (e) {} process.exit(0); }
+// 保持資料庫活躍（Supabase 免費方案閒置一週會自動暫停）
+setInterval(() => {
+  if (pgClient) pgClient.query('SELECT 1').catch(() => {});
+}, 6 * 60 * 60 * 1000);
+function flushExit() {
+  if (pgClient) {
+    pgClient.query(
+      'INSERT INTO savegame (id, data) VALUES (1, $1) ON CONFLICT (id) DO UPDATE SET data = $1',
+      [JSON.stringify(db)]
+    ).then(() => process.exit(0)).catch(() => process.exit(0));
+    setTimeout(() => process.exit(0), 1500);
+  } else {
+    try { fs.writeFileSync(DB_FILE, JSON.stringify(db)); } catch (e) {}
+    process.exit(0);
+  }
+}
 process.on('SIGINT', flushExit);
 process.on('SIGTERM', flushExit);
 
@@ -1071,4 +1123,6 @@ setInterval(() => {
 
 setInterval(() => { for (const ws of sockets) if (ws.player) persist(ws); }, 30000);
 
-server.listen(PORT, () => console.log(`龍領主 Online 伺服器已啟動： http://localhost:${PORT}`));
+initStore()
+  .then(() => server.listen(PORT, () => console.log(`龍領主 Online 伺服器已啟動： http://localhost:${PORT}`)))
+  .catch((e) => { console.error('資料庫連線失敗：', e.message); console.error('請檢查 DATABASE_URL 是否正確'); process.exit(1); });

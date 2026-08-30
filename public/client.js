@@ -323,6 +323,8 @@ function handle(m) {
       if (!$('#smith').classList.contains('hidden')) renderSmith();
       if (!$('#shop').classList.contains('hidden')) renderShop();
       if (!$('#gearshop').classList.contains('hidden')) refreshGearShop();
+      if (!$('#market').classList.contains('hidden')) renderMarket();
+      if (!$('#exchange').classList.contains('hidden') && tradeState) renderTradeRoom();
       break;
     case 'ev': handleEvent(m); break;
     case 'msg':
@@ -337,6 +339,8 @@ function handle(m) {
     case 'roster': roster = m.list || []; $('#onlinen').textContent = roster.length + ' 人';
       if (!$('#players').classList.contains('hidden')) renderRoster(); break;
     case 'dead': dead = true; $('#deathview').classList.remove('hidden'); SND.die(); break;
+    case 'market': marketData = m.list || []; renderMarket(); break;
+    case 'trade': handleTrade(m); break;
     case 'enhance': {
       const fx = $('#enhfx');
       if (m.ok) { fx.textContent = '✨ 強化成功！【' + m.name + '】 → +' + m.plus; fx.style.color = '#8fd98f'; SND.enhOk(); }
@@ -403,7 +407,7 @@ function renderRoster() {
       html += `<div class="prow${p.id === myId ? ' self' : ''}">
         <span class="cdot" style="background:${CLS_COLOR[p.cls]}"></span>
         <span class="lv">Lv.${p.lvl}</span>
-        <span class="pn">${esc(p.name)}${p.id === myId ? ' <span style="color:var(--gold);font-size:11px">（你）</span>' : ''}</span>
+        <span class="pn">${esc(p.name)}${p.bot ? ' <span style="color:#7f8aa8;font-size:11px">🤖</span>' : ''}${p.id === myId ? ' <span style="color:var(--gold);font-size:11px">（你）</span>' : ''}</span>
         <span class="cl">${GAME.CLASSES[p.cls].name}</span>
         ${p.dead ? '<span class="st">💀 陣亡</span>' : ''}
       </div>`;
@@ -963,8 +967,10 @@ function togglePanel(id, forceOpen) {
   if (id === 'shop') renderShop();
   if (id === 'gearshop') renderGearShop();
   if (id === 'smith') renderSmith(true);
+  if (id === 'market') { send({ t: 'market', act: 'list' }); renderMarket(true); }
+  if (id === 'exchange') { send({ t: 'trade', act: 'who' }); renderExchange(); }
 }
-const PANELS = ['bag', 'shop', 'gearshop', 'smith', 'help', 'chatpanel', 'players'];
+const PANELS = ['bag', 'shop', 'gearshop', 'smith', 'market', 'exchange', 'tradeinvite', 'help', 'chatpanel', 'players'];
 function closePanels() { PANELS.forEach((p) => $('#' + p).classList.add('hidden')); syncScrim(); }
 function syncScrim() {
   const any = PANELS.some((p) => !$('#' + p).classList.contains('hidden'));
@@ -1194,6 +1200,201 @@ function renderSmith(force) {
   bindTips(grid, (u) => all.find((i) => i.uid === u));
 }
 $('#btn-enhance').onclick = () => { if (enhUid) send({ t: 'enhance', uid: enhUid }); };
+// 鐵匠鋪回收：依稀有度賣掉不要的裝備
+$('#btn-sell').onclick = () => {
+  if (!enhUid || !meData) return;
+  const it = meData.inv.find((x) => x.uid === enhUid);
+  if (!it) { toast('只能賣背包裡的裝備（裝在身上的請先卸下）'); return; }
+  const price = GAME.sellPrice(it);
+  if (confirm(`確定把【${it.name}${it.plus ? ' +' + it.plus : ''}】賣給鐵匠鋪嗎？\n可獲得 ${price.toLocaleString()} 金幣（賣掉就拿不回來了）`)) {
+    send({ t: 'sell', uid: enhUid });
+    enhUid = null; smithSig = '';
+  }
+};
+
+/* ================= 二手商店（全服寄賣） ================= */
+let marketData = [], mktTab = 'buy', mktSelUid = null;
+$$('[data-mtab]').forEach((b) => b.onclick = () => {
+  mktTab = b.dataset.mtab;
+  $$('[data-mtab]').forEach((x) => x.classList.toggle('on', x === b));
+  renderMarket(true);
+});
+function marketRow(l, mine) {
+  const it = l.item;
+  const q = GAME.QUALITIES[it.q];
+  const stats = it.slot === 'weapon'
+    ? `⚔ +${Math.floor(GAME.GEAR_TIERS[it.tier].wAtk * q.mul * (1 + (it.plus || 0) * GAME.ENHANCE_BONUS))}`
+    : `🛡 +${Math.floor(GAME.GEAR_TIERS[it.tier].aDef * q.mul * (1 + (it.plus || 0) * GAME.ENHANCE_BONUS))}　❤ +${Math.floor(GAME.GEAR_TIERS[it.tier].aHp * q.mul * (1 + (it.plus || 0) * GAME.ENHANCE_BONUS))}`;
+  const clsTag = it.slot === 'weapon' ? `｜${GAME.CLASSES[it.cls].name}專用` : '';
+  const qc = q.color === 'rainbow' ? '#fff' : q.color;
+  const poor = !mine && meData && meData.gold < l.price;
+  return `<div class="mrow">
+    <span class="ic q${it.q}" style="background-image:url(${gearIconURL(it, myCls)})"></span>
+    <span class="nm"><span style="color:${qc}">${esc(it.name)}${it.plus ? ' +' + it.plus : ''}</span>
+      ${l.boss ? '<span class="bosstag">BOSS</span>' : ''}<br>
+      <small>${q.name}${clsTag}｜${stats}<br>賣家：${esc(l.seller)}</small></span>
+    <span class="pr">${l.price.toLocaleString()} 💰</span>
+    <button class="sbtn" data-${mine ? 'cancel' : 'buy'}="${l.id}" ${poor ? 'disabled' : ''}>${mine ? '下架' : '購買'}</button>
+  </div>`;
+}
+function renderMarket(force) {
+  if (!meData) return;
+  renderWallet('#marketwallet');
+  $('#mkt-buy').classList.toggle('hidden', mktTab !== 'buy');
+  $('#mkt-sell').classList.toggle('hidden', mktTab !== 'sell');
+  $('#mkt-mine').classList.toggle('hidden', mktTab !== 'mine');
+
+  if (mktTab === 'buy') {
+    const list = marketData.filter((l) => l.seller !== myName);
+    $('#mkt-buy').innerHTML = list.length
+      ? list.slice().sort((a, b) => a.price - b.price).map((l) => marketRow(l, false)).join('')
+      : '<div class="emptyhint">目前沒有人寄賣商品<br>切到「我要上架」把用不到的裝備賣給大家吧！</div>';
+    $('#mkt-buy').querySelectorAll('[data-buy]').forEach((b) => b.onclick = () => {
+      const l = marketData.find((x) => x.id === b.dataset.buy);
+      if (l && confirm(`確定用 ${l.price.toLocaleString()} 金幣買下【${l.item.name}】嗎？`))
+        send({ t: 'market', act: 'buy', id: b.dataset.buy });
+    });
+  } else if (mktTab === 'mine') {
+    const list = marketData.filter((l) => l.seller === myName);
+    $('#mkt-mine').innerHTML = list.length
+      ? `<div class="shophint">寄賣中 ${list.length}/${GAME.MARKET_SLOTS} 件。賣出後金幣會自動入帳（即使你不在線上）。</div>`
+        + list.map((l) => marketRow(l, true)).join('')
+      : '<div class="emptyhint">你目前沒有寄賣中的商品</div>';
+    $('#mkt-mine').querySelectorAll('[data-cancel]').forEach((b) => b.onclick = () =>
+      send({ t: 'market', act: 'cancel', id: b.dataset.cancel }));
+  } else {
+    renderMarketSell(force);
+  }
+}
+function renderMarketSell(force) {
+  const grid = $('#mkt-grid');
+  const sig = bagSignature() + '|' + mktSelUid;
+  if (!force && grid.dataset.sig === sig) return;
+  grid.dataset.sig = sig;
+  grid.innerHTML = '';
+  const sellable = meData.inv.filter((it) => it.kind === 'equip' && !it.untradeable);
+  if (!sellable.length) {
+    grid.innerHTML = '<div class="emptyhint" style="grid-column:1/-1">背包裡沒有可以上架的裝備</div>';
+    $('#mkt-target').innerHTML = '<span style="color:#667">背包沒有裝備</span>';
+    return;
+  }
+  sellable.forEach((it) => grid.insertAdjacentHTML('beforeend', cellHTML(it)));
+  grid.querySelectorAll('.cell[data-uid]').forEach((el) => el.onclick = () => {
+    mktSelUid = el.dataset.uid; renderMarketSell(true);
+  });
+  bindTips(grid, (u) => meData.inv.find((i) => i.uid === u));
+  const sel = sellable.find((i) => i.uid === mktSelUid);
+  if (sel) {
+    grid.querySelector(`.cell[data-uid="${mktSelUid}"]`).classList.add('sel');
+    const min = sel.boss ? GAME.MARKET_MIN_BOSS : 1;
+    $('#mkt-target').innerHTML = cellHTML(sel) +
+      `<div><b>${esc(sel.name)}${sel.plus ? ' +' + sel.plus : ''}</b>${sel.boss ? '<span class="bosstag">BOSS</span>' : ''}
+       <div style="font-size:12px;color:#9aa">最低售價 <b style="color:var(--gold)">${min.toLocaleString()}</b>
+       ｜鐵匠鋪回收價僅 ${GAME.sellPrice(sel).toLocaleString()}</div></div>`;
+    const inp = $('#mkt-price');
+    if (!inp.value || +inp.value < min) inp.value = min > 1 ? min : GAME.sellPrice(sel) * 3;
+  } else {
+    $('#mkt-target').innerHTML = '<span style="color:#667">👆 先選一件裝備</span>';
+  }
+}
+$('#btn-list').onclick = () => {
+  if (!mktSelUid) { toast('請先選一件要上架的裝備'); return; }
+  const price = Math.floor(+$('#mkt-price').value || 0);
+  if (!(price > 0)) { toast('請輸入售價'); return; }
+  send({ t: 'market', act: 'sell', uid: mktSelUid, price });
+  mktSelUid = null; $('#mkt-price').value = '';
+};
+
+/* ================= 交易所（玩家對玩家面交） ================= */
+let tradeState = null, tradeOffer = [], inviteFrom = null;
+function renderExchange() {
+  const inRoom = !!tradeState;
+  $('#ex-lobby').classList.toggle('hidden', inRoom);
+  $('#ex-room').classList.toggle('hidden', !inRoom);
+  $('#ex-foot').classList.toggle('hidden', !inRoom);
+  if (inRoom) renderTradeRoom();
+}
+function renderWho(list, meNear) {
+  const box = $('#ex-who');
+  if (!meNear) { box.innerHTML = '<div class="emptyhint">請站到交易所旁邊再開啟</div>'; return; }
+  if (!list.length) { box.innerHTML = '<div class="emptyhint">交易所附近目前沒有其他玩家<br>約好朋友一起站到交易所前面吧！</div>'; return; }
+  box.innerHTML = list.map((q) => `<div class="prow">
+    <span class="cdot" style="background:${CLS_COLOR[q.cls]}"></span>
+    <span class="lv">Lv.${q.lvl}</span><span class="pn">${esc(q.name)}</span>
+    <span class="cl">${GAME.CLASSES[q.cls].name}</span>
+    <button class="sbtn" data-inv="${q.id}" ${q.busy ? 'disabled' : ''}>${q.busy ? '交易中' : '邀請'}</button>
+  </div>`).join('');
+  box.querySelectorAll('[data-inv]').forEach((b) => b.onclick = () => send({ t: 'trade', act: 'invite', to: b.dataset.inv }));
+}
+function renderTradeRoom() {
+  const ts = tradeState; if (!ts || !meData) return;
+  const mk = (items) => items.length
+    ? items.map((it) => cellHTML(it)).join('')
+    : '<div style="grid-column:1/-1;color:#667;font-size:12px;padding:8px 0">（尚未放入物品）</div>';
+  $('#ex-mineitems').innerHTML = mk(ts.mine.items);
+  $('#ex-theiritems').innerHTML = mk(ts.theirs.items);
+  bindTips($('#ex-theiritems'), (u) => ts.theirs.items.find((i) => i.uid === u));
+  $('#ex-othername').innerHTML = `${esc(ts.other.name)}（Lv.${ts.other.lvl} ${GAME.CLASSES[ts.other.cls].name}） <span id="ex-theirok"></span>`;
+  $('#ex-mineok').innerHTML = ts.mine.ok ? '<span class="okmark">✅ 已確認</span>' : '<span class="nomark">未確認</span>';
+  $('#ex-theirok').innerHTML = ts.theirs.ok ? '<span class="okmark">✅ 已確認</span>' : '<span class="nomark">未確認</span>';
+  $('#ex-theirgold').textContent = '💰 ' + ts.theirs.gold.toLocaleString();
+  if (document.activeElement !== $('#ex-mygold')) $('#ex-mygold').value = ts.mine.gold || '';
+  $('#btn-tradeok').textContent = ts.mine.ok ? '↩ 取消確認' : '✅ 確認交易';
+  // 背包（可點選放入 / 取出）
+  const bag = $('#ex-bag'); bag.innerHTML = '';
+  const pool = meData.inv.filter((it) => it.kind === 'equip' && !it.untradeable);
+  pool.forEach((it) => bag.insertAdjacentHTML('beforeend', cellHTML(it)));
+  bag.querySelectorAll('.cell[data-uid]').forEach((el) => {
+    if (tradeOffer.includes(el.dataset.uid)) el.classList.add('sel');
+    el.onclick = () => {
+      const u = el.dataset.uid;
+      if (tradeOffer.includes(u)) tradeOffer = tradeOffer.filter((x) => x !== u);
+      else { if (tradeOffer.length >= GAME.TRADE_SLOTS) { toast(`最多放 ${GAME.TRADE_SLOTS} 件`); return; } tradeOffer.push(u); }
+      sendOffer();
+    };
+  });
+  bindTips(bag, (u) => meData.inv.find((i) => i.uid === u));
+}
+function sendOffer() {
+  if (!tradeState) return;
+  send({ t: 'trade', act: 'offer', items: tradeOffer, gold: Math.floor(+$('#ex-mygold').value || 0) });
+}
+$('#ex-mygold').addEventListener('change', sendOffer);
+$('#ex-mygold').addEventListener('keydown', (e) => e.stopPropagation());
+$('#mkt-price').addEventListener('keydown', (e) => e.stopPropagation());
+$('#btn-tradeok').onclick = () => { if (tradeState) send({ t: 'trade', act: 'ok', ok: !tradeState.mine.ok }); };
+$('#btn-tradecancel').onclick = () => { if (tradeState) send({ t: 'trade', act: 'cancel' }); };
+$('#btn-tiyes').onclick = () => { if (inviteFrom) send({ t: 'trade', act: 'accept', from: inviteFrom.id }); togglePanel('tradeinvite'); };
+$('#btn-tino').onclick = () => { if (inviteFrom) send({ t: 'trade', act: 'decline', from: inviteFrom.id }); togglePanel('tradeinvite'); };
+function handleTrade(m) {
+  if (m.act === 'who') { renderWho(m.list || [], m.me); return; }
+  if (m.act === 'invited') {
+    inviteFrom = m.from;
+    $('#ti-text').innerHTML = `<b style="color:var(--gold)">${esc(m.from.name)}</b>（Lv.${m.from.lvl} ${GAME.CLASSES[m.from.cls].name}）<br>想跟你交易，要接受嗎？`;
+    togglePanel('tradeinvite', true);
+    SND.key && SND.key();
+    return;
+  }
+  if (m.act === 'state') {
+    tradeState = m;
+    tradeOffer = m.mine.items.map((i) => i.uid);
+    togglePanel('exchange', true);
+    renderExchange();
+    return;
+  }
+  if (m.act === 'end') {
+    tradeState = null; tradeOffer = [];
+    if (m.msg) toast(m.msg);
+    renderExchange();
+    if (m.msg && m.msg.startsWith('✅')) { SND.coin(); announce(m.msg); }
+    return;
+  }
+}
+// 交易所開著時，持續更新附近玩家
+setInterval(() => {
+  if (!myId) return;
+  if (!$('#exchange').classList.contains('hidden') && !tradeState) send({ t: 'trade', act: 'who' });
+}, 2500);
 
 /* ---------------- HUD ---------------- */
 function updateHUD() {
@@ -1988,7 +2189,8 @@ function drawTown(x2, md, R) {
   }
 
   // ---- 建築（立體屋） ----
-  const roofColors = { gear: ['#a05242', '#7a3c30'], shop: ['#4a7ba0', '#38607e'], smith: ['#6a6a72', '#4e4e56'], inn: ['#8a5f9e', '#6c4880'] };
+  const roofColors = { gear: ['#a05242', '#7a3c30'], shop: ['#4a7ba0', '#38607e'], smith: ['#6a6a72', '#4e4e56'],
+    inn: ['#8a5f9e', '#6c4880'], market: ['#3f8a6a', '#2c6650'], exchange: ['#b08a3c', '#8a682a'] };
   for (const b of T.buildings) {
     const wd = b.w, hh = b.h, x = b.x, y = b.y;
     x2.fillStyle = 'rgba(0,0,0,.38)'; x2.fillRect(x - wd / 2 + 8, y - hh / 2 + 10, wd, hh);
@@ -2564,17 +2766,24 @@ function drawChar(g, cls, x, y, h, dir, vis, hpRatio, name, lvl, deadFlag, wante
 }
 
 function drawDoll() {
-  const dc = $('#dollcv'), g = dc.getContext('2d');
-  g.clearRect(0, 0, dc.width, dc.height);
+  const dc = $('#dollcv');
+  // 畫布的實際像素要跟著 CSS 尺寸走，否則手機上會被拉寬變扁
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const cw = Math.max(140, dc.clientWidth || 230), ch = Math.max(120, dc.clientHeight || 230);
+  const pw = Math.round(cw * dpr), ph = Math.round(ch * dpr);
+  if (dc.width !== pw || dc.height !== ph) { dc.width = pw; dc.height = ph; }
+  const g = dc.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, cw, ch);
   if (!meData) return;
   const vis = {};
   GAME.SLOTS.forEach((s) => {
     const it = meData.equip[s];
     if (it) vis[s] = [GAME.GEAR_TIERS[it.tier].tier, it.q, it.plus];
   });
-  drawChar(g, myCls, dc.width / 2, dc.height - 24, 170, 1, vis, undefined);
+  drawChar(g, myCls, cw / 2, ch - 18, Math.min(180, ch - 42), 1, vis, undefined);
   g.font = 'bold 13px sans-serif'; g.textAlign = 'center'; g.fillStyle = '#e8c874';
-  g.fillText(`${myName}　Lv.${meData.lvl} ${GAME.CLASSES[myCls].name}`, dc.width / 2, 16);
+  g.fillText(`${myName}　Lv.${meData.lvl} ${GAME.CLASSES[myCls].name}`, cw / 2, 16);
 }
 
 /* ---------------- 主渲染迴圈 ---------------- */

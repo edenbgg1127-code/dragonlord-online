@@ -21,7 +21,7 @@ const DB_FILE = path.join(DATA_DIR, 'db.json');
    進度改存雲端資料庫 → Render 免費方案重新部署也不會遺失！ */
 const DATABASE_URL = process.env.DATABASE_URL;
 let pgClient = null;
-let db = { accounts: {}, guests: {} };
+let db = { accounts: {}, guests: {}, market: [] };
 
 function loadFromFile() {
   try {
@@ -66,6 +66,9 @@ async function initStore() {
     loadFromFile();
     console.log('ℹ 使用本機檔案存檔 data/db.json（想永久保存進度可設定 DATABASE_URL，見 README）');
   }
+  if (!db.accounts) db.accounts = {};
+  if (!db.guests) db.guests = {};
+  if (!Array.isArray(db.market)) db.market = [];   // 二手商店寄賣清單（跨重開機保存）
 }
 
 let dbDirty = false;
@@ -156,16 +159,20 @@ function rollQuality(table) {
   for (const [q, p] of table) { if (r < p) return q; r -= p; }
   return table === G.BOSS_QUALITY_ROLL ? 1 : 0;
 }
-function bossDropItems(gearTier, mainClass) {
-  const n = rndi(1, 3);
+// BOSS 掉寶：品質由該 BOSS 固定（第1區＝金、第2區＝紅、大BOSS＝彩）
+function bossDropItems(mobInfo, mainClass) {
+  const dn = mobInfo.dropN || [1, 3];
+  const n = rndi(dn[0], dn[1]);
   const items = [];
   const classes = ['warrior', 'archer', 'assassin'];
   for (let i = 0; i < n; i++) {
-    const q = rollQuality(G.BOSS_QUALITY_ROLL);
+    const q = mobInfo.dropQ !== undefined ? mobInfo.dropQ : rollQuality(G.BOSS_QUALITY_ROLL);
     const slot = G.SLOTS[rndi(0, G.SLOTS.length - 1)];
     // 武器 80% 掉擊殺者可用的職業，避免撿到一堆不能裝的武器
     const forClass = (mainClass && Math.random() < 0.8) ? mainClass : classes[rndi(0, 2)];
-    items.push(makeEquip(gearTier, slot, q, forClass));
+    const it = makeEquip(mobInfo.gearTier, slot, q, forClass);
+    it.boss = 1;                 // 標記為 BOSS 掉落：二手商店最低售價 150 萬
+    items.push(it);
   }
   return items;
 }
@@ -287,6 +294,14 @@ const wss = new WebSocketServer({ server, maxPayload: 16 * 1024 });
 
 const sockets = new Set();
 const players = new Map();
+const bots = [];                    // 每區的假人（AI 陪玩），行為與玩家相同但沒有連線
+/* 世界中所有「像玩家的實體」＝真實玩家 ＋ 假人 */
+function allPlayers() {
+  const out = [];
+  for (const ws of sockets) if (ws.player) out.push(ws.player);
+  for (const b of bots) out.push(b);
+  return out;
+}
 const accountSockets = new Map();
 const chatHistory = [];             // 全服聊天記錄（最近 60 則）   // 帳號key → Set(連線)，確保一個帳號只有一個角色在線
 
@@ -325,6 +340,7 @@ function kickOthers(ws) {
 }
 /* 立刻把某個角色移出世界（回選角／登出用） */
 function leaveWorld(ws, silent) {
+  if (ws.player) { const tr = tradeOf(ws.player); if (tr) endTrade(tr, '對方離開了世界，交易取消。'); }
   if (!ws.player) return;
   setTimeout(pushRoster, 60);
   persist(ws);
@@ -439,8 +455,8 @@ function killMob(mapId, mob, killer) {
     killer.gold += gold;
     send(killer.ws, { t: 'loot', gold });
   }
-  if (mob.boss && killer) {
-    for (const item of bossDropItems(md.gearTier, killer.cls)) dropToGround(mapId, mob.x, mob.y, item);
+  if (mob.boss && killer && killer.ws) {
+    for (const item of bossDropItems(md, killer.cls)) dropToGround(mapId, mob.x, mob.y, item);
     if (md.memento && !killer.flags[mob.kind]) {
       killer.flags[mob.kind] = true;
       killer.inv.push({ uid: uid(), kind: 'memento', id: md.memento.id, name: md.memento.name, desc: md.memento.desc, untradeable: true });
@@ -469,6 +485,11 @@ function damageMob(mapId, mob, dmg, attacker, opts) {
 
 function damagePlayer(victim, dmg, source) {
   if (victim.dead) return;
+  // 假人：被玩家主動攻擊 → 反擊該玩家 20 秒
+  if (victim.bot && source && source.type === 'player' && source.ref) {
+    victim.grudgeId = source.ref.id;
+    victim.grudgeUntil = now() + 20000;
+  }
   const def = calcStats(victim).def;
   const eff = Math.max(1, Math.floor(dmg * (100 / (100 + def)) * rnd(0.9, 1.1)));
   victim.hp -= eff;
@@ -490,12 +511,16 @@ function damagePlayer(victim, dmg, source) {
           if (pick.from === 'equip') { item = victim.equip[pick.slot]; victim.equip[pick.slot] = null; }
           else { item = victim.inv.splice(pick.i, 1)[0]; }
           dropToGround(victim.mapId, victim.x, victim.y, item);
-          send(victim.ws, { t: 'msg', msg: `你掉落了【${item.name}】！` });
+          if (victim.ws) send(victim.ws, { t: 'msg', msg: `你掉落了【${item.name}】！` });
         }
       }
       if (inTown(victim.mapId, victim.x, victim.y)) spawnGuards(killer);
     }
-    send(victim.ws, { t: 'dead' });
+    if (victim.bot) { victim.respawnAt = now() + G.DUMMY_RESPAWN; setTimeout(pushRoster, 60); }
+    else {
+      const tr = tradeOf(victim); if (tr) endTrade(tr, '有人陣亡，交易取消。');
+      send(victim.ws, { t: 'dead' });
+    }
   }
 }
 
@@ -538,9 +563,8 @@ function hitArea(p, cx, cy, radius, dmg, opts) {
     if (g.hp <= 0) w.guards.splice(w.guards.indexOf(g), 1);
     hit++;
   }
-  for (const ws2 of sockets) {
-    const q = ws2.player;
-    if (!q || q === p || q.mapId !== p.mapId || q.dead) continue;
+  for (const q of allPlayers()) {
+    if (q === p || q.mapId !== p.mapId || q.dead) continue;
     if (dist2(cx, cy, q.x, q.y) > (radius + 26) ** 2) continue;
     if (!G.hasLOS(p.mapId, cx, cy, q.x, q.y)) continue;
     damagePlayer(q, dmg, { type: 'player', ref: p });
@@ -556,7 +580,7 @@ function playerAttack(p, aim) {
   if (p.dead || t - p.atkAt < c.atkCd) return;
   p.atkAt = t;
   if (c.usesArrows) {
-    if (p.arrows <= 0) { send(p.ws, { t: 'msg', msg: '箭矢用完了！回城鎮商店購買（1 金幣/支）' }); return; }
+    if (p.arrows <= 0) { if (p.ws) send(p.ws, { t: 'msg', msg: '箭矢用完了！回城鎮商店購買（1 金幣/支）' }); return; }
     p.arrows--;
   }
   const st = calcStats(p);
@@ -593,9 +617,8 @@ function playerAttack(p, aim) {
     g.hp -= dmg; ev(p.mapId, 'dmg', { x: g.x, y: g.y - 25, val: Math.floor(dmg), crit });
     if (g.hp <= 0) w.guards.splice(w.guards.indexOf(g), 1);
   }
-  for (const ws2 of sockets) {
-    const q = ws2.player;
-    if (!q || q === p || q.mapId !== p.mapId || q.dead) continue;
+  for (const q of allPlayers()) {
+    if (q === p || q.mapId !== p.mapId || q.dead) continue;
     if (dist2(p.x, p.y, q.x, q.y) > (c.range + 26) ** 2) continue;
     const ma = Math.atan2(q.y - p.y, q.x - p.x);
     let da = Math.abs(ma - ang); if (da > Math.PI) da = Math.PI * 2 - da;
@@ -612,7 +635,7 @@ function castSkill(p, idx, aim) {
   const t = now();
   if (t - p.skillAt[idx] < sk.cd) return;
   if (sk.arrows) {
-    if (p.arrows < sk.arrows) { send(p.ws, { t: 'msg', msg: `箭矢不足（需要 ${sk.arrows} 支）` }); return; }
+    if (p.arrows < sk.arrows) { if (p.ws) send(p.ws, { t: 'msg', msg: `箭矢不足（需要 ${sk.arrows} 支）` }); return; }
     p.arrows -= sk.arrows;
   }
   p.skillAt[idx] = t;
@@ -692,9 +715,8 @@ function castSkill(p, idx, aim) {
         damageMob(p.mapId, mob, base * rnd(0.9, 1.1), p);
         mob.poison = { left: poison.ticks, dmg: poison.dmg, owner: p.id, nextAt: now() + 1000 };
       }
-      for (const ws2 of sockets) {
-        const q = ws2.player;
-        if (!q || q === p || q.mapId !== p.mapId || q.dead) continue;
+      for (const q of allPlayers()) {
+        if (q === p || q.mapId !== p.mapId || q.dead) continue;
         if (dist2(p.x, p.y, q.x, q.y) > (sk.radius + 26) ** 2) continue;
         const ma = Math.atan2(q.y - p.y, q.x - p.x);
         let da = Math.abs(ma - ang); if (da > Math.PI) da = Math.PI * 2 - da;
@@ -711,7 +733,79 @@ function castSkill(p, idx, aim) {
 function nearBuilding(p, key) {
   if (p.mapId === 3) return false;
   const b = G.TOWN.buildings.find((x) => x.key === key);
-  return b && dist2(p.x, p.y, b.x, b.y) < 170 * 170;
+  return b && dist2(p.x, p.y, b.x, b.y) < 220 * 220;
+}
+
+/* ================= 二手商店（全服寄賣） =================
+   玩家把不要的裝備掛上去自訂售價，全伺服器都看得到、都能用金幣買走。
+   BOSS 掉落的裝備最低售價 150 萬；寶箱／商店裝備不限價。 */
+function marketList() {
+  return db.market.map((l) => ({
+    id: l.id, price: l.price, seller: l.sellerName, at: l.at,
+    item: l.item, boss: l.item.boss ? 1 : 0
+  }));
+}
+function pushMarket(target) {
+  const payload = { t: 'market', list: marketList() };
+  if (target) send(target, payload);
+  else for (const ws of sockets) if (ws.player) send(ws, payload);
+}
+// 賣家可能不在線上：直接把錢記進存檔裡的角色
+function payOut(listing, amount) {
+  const live = players.get(listing.sellerCharId);
+  if (live) { live.gold += amount; if (live.ws) send(live.ws, { t: 'msg', msg: `💰 你的【${listing.item.name}】賣出了，入帳 ${amount.toLocaleString()} 金幣！` }); return; }
+  const acc = listing.sellerGuest ? db.guests[listing.sellerKey] : db.accounts[listing.sellerKey];
+  if (!acc) return;
+  const c = acc.chars.find((x) => x.id === listing.sellerCharId);
+  if (c) { c.gold = (c.gold || 0) + amount; dbDirty = true; }
+}
+
+/* ================= 交易所（玩家對玩家面交） =================
+   雙方各自放入裝備與金幣，兩邊都按下「確認」才成交。
+   任一方改動內容會取消雙方的確認狀態，避免掉包。 */
+const trades = new Map();          // tradeId -> { a, b }
+let tradeSeq = 1;
+function tradeOf(p) { return p.tradeId ? trades.get(p.tradeId) : null; }
+function tradeSideOf(tr, p) { return tr.a.p === p ? tr.a : tr.b; }
+function tradeOther(tr, p) { return tr.a.p === p ? tr.b : tr.a; }
+function tradeItemView(p, side) {
+  return side.items.map((u) => p.inv.find((it) => it.uid === u)).filter(Boolean);
+}
+function pushTrade(tr) {
+  for (const side of [tr.a, tr.b]) {
+    const me = side, other = tradeOther(tr, side.p);
+    send(side.p.ws, {
+      t: 'trade', act: 'state', id: tr.id,
+      other: { name: other.p.name, cls: other.p.cls, lvl: other.p.lvl },
+      mine: { items: tradeItemView(me.p, me), gold: me.gold, ok: me.ok },
+      theirs: { items: tradeItemView(other.p, other), gold: other.gold, ok: other.ok }
+    });
+  }
+}
+function endTrade(tr, reason) {
+  if (!tr || tr.done) return;
+  tr.done = true;
+  trades.delete(tr.id);
+  for (const side of [tr.a, tr.b]) {
+    side.p.tradeId = null;
+    if (side.p.ws) send(side.p.ws, { t: 'trade', act: 'end', msg: reason });
+  }
+}
+function settleTrade(tr) {
+  const A = tr.a, B = tr.b;
+  const aItems = tradeItemView(A.p, A), bItems = tradeItemView(B.p, B);
+  if (aItems.length !== A.items.length || bItems.length !== B.items.length) return endTrade(tr, '交易物品有變動，已取消。');
+  if (A.p.gold < A.gold || B.p.gold < B.gold) return endTrade(tr, '金幣不足，交易取消。');
+  if (aItems.some((i) => i.untradeable) || bItems.some((i) => i.untradeable)) return endTrade(tr, '含有無法交易的道具，已取消。');
+  if (A.p.inv.length - aItems.length + bItems.length > 40) return endTrade(tr, `${A.p.name} 的背包空間不足，交易取消。`);
+  if (B.p.inv.length - bItems.length + aItems.length > 40) return endTrade(tr, `${B.p.name} 的背包空間不足，交易取消。`);
+  for (const it of aItems) A.p.inv.splice(A.p.inv.indexOf(it), 1);
+  for (const it of bItems) B.p.inv.splice(B.p.inv.indexOf(it), 1);
+  A.p.inv.push(...bItems); B.p.inv.push(...aItems);
+  A.p.gold += B.gold - A.gold;
+  B.p.gold += A.gold - B.gold;
+  persist(A.p.ws); persist(B.p.ws);
+  endTrade(tr, '✅ 交易完成！');
 }
 
 function handleAction(ws, m) {
@@ -882,6 +976,152 @@ function handleAction(ws, m) {
       p.hp = Math.min(p.hp, calcStats(p).maxHp);
       break;
     }
+    /* ---- 鐵匠鋪回收：依稀有度換金幣 ---- */
+    case 'sell': {
+      if (!nearBuilding(p, 'smith')) { send(ws, { t: 'msg', msg: '請靠近鐵匠鋪！' }); return; }
+      const i = p.inv.findIndex((it) => it.uid === m.uid);
+      if (i < 0) return;
+      const it = p.inv[i];
+      if (it.kind !== 'equip') { send(ws, { t: 'msg', msg: '這個道具鐵匠鋪不收。' }); return; }
+      if (it.untradeable) { send(ws, { t: 'msg', msg: '紀念道具無法賣出。' }); return; }
+      const price = G.sellPrice(it);
+      p.inv.splice(i, 1);
+      p.gold += price;
+      send(ws, { t: 'msg', msg: `🔨 賣出【${it.name}${it.plus ? ' +' + it.plus : ''}】，獲得 ${price.toLocaleString()} 金幣` });
+      persist(ws);
+      break;
+    }
+
+    /* ---- 二手商店（全服寄賣，只能用金幣買） ---- */
+    case 'market': {
+      if (m.act === 'list') { pushMarket(ws); break; }
+      if (!nearBuilding(p, 'market')) { send(ws, { t: 'msg', msg: '請靠近二手商店！' }); return; }
+
+      if (m.act === 'sell') {
+        const i = p.inv.findIndex((it) => it.uid === m.uid);
+        if (i < 0) return;
+        const it = p.inv[i];
+        if (it.kind !== 'equip') { send(ws, { t: 'msg', msg: '只能寄賣裝備。' }); return; }
+        if (it.untradeable) { send(ws, { t: 'msg', msg: '這個道具無法交易。' }); return; }
+        const mine = db.market.filter((l) => l.sellerCharId === p.id).length;
+        if (mine >= G.MARKET_SLOTS) { send(ws, { t: 'msg', msg: `最多同時寄賣 ${G.MARKET_SLOTS} 件，請先下架。` }); return; }
+        let price = Math.floor(+m.price || 0);
+        if (!(price > 0) || price > G.MARKET_MAX_PRICE) { send(ws, { t: 'msg', msg: '售價不正確。' }); return; }
+        if (it.boss && price < G.MARKET_MIN_BOSS) {
+          send(ws, { t: 'msg', msg: `BOSS 掉落的裝備最低售價 ${G.MARKET_MIN_BOSS.toLocaleString()} 金幣！` });
+          return;
+        }
+        p.inv.splice(i, 1);
+        db.market.push({
+          id: uid(), item: it, price, at: now(),
+          sellerName: p.name, sellerCharId: p.id,
+          sellerKey: ws.auth.key, sellerGuest: !!ws.auth.guest
+        });
+        dbDirty = true;
+        send(ws, { t: 'msg', msg: `🏷 已上架【${it.name}】，售價 ${price.toLocaleString()} 金幣` });
+        persist(ws); pushMarket();
+        break;
+      }
+
+      if (m.act === 'cancel') {
+        const i = db.market.findIndex((l) => l.id === m.id);
+        if (i < 0) return;
+        const l = db.market[i];
+        if (l.sellerCharId !== p.id) { send(ws, { t: 'msg', msg: '這不是你的商品。' }); return; }
+        if (p.inv.length >= 40) { send(ws, { t: 'msg', msg: '背包已滿，無法下架！' }); return; }
+        db.market.splice(i, 1); dbDirty = true;
+        p.inv.push(l.item);
+        send(ws, { t: 'msg', msg: `已下架【${l.item.name}】` });
+        persist(ws); pushMarket();
+        break;
+      }
+
+      if (m.act === 'buy') {
+        const i = db.market.findIndex((l) => l.id === m.id);
+        if (i < 0) { send(ws, { t: 'msg', msg: '這件商品已經被買走了。' }); pushMarket(ws); return; }
+        const l = db.market[i];
+        if (l.sellerCharId === p.id) { send(ws, { t: 'msg', msg: '不能買自己的商品，可以直接下架。' }); return; }
+        if (p.gold < l.price) { send(ws, { t: 'msg', msg: '金幣不足！' }); return; }
+        if (p.inv.length >= 40) { send(ws, { t: 'msg', msg: '背包已滿！' }); return; }
+        db.market.splice(i, 1); dbDirty = true;
+        p.gold -= l.price;
+        p.inv.push(l.item);
+        payOut(l, l.price);
+        send(ws, { t: 'msg', msg: `🛒 購買成功！獲得【${l.item.name}】` });
+        persist(ws); pushMarket();
+        break;
+      }
+      break;
+    }
+
+    /* ---- 交易所（玩家對玩家面交） ---- */
+    case 'trade': {
+      const act = m.act;
+      if (act === 'who') {                       // 誰也在交易所附近
+        const near = [];
+        for (const ws2 of sockets) {
+          const q = ws2.player;
+          if (!q || q === p || q.mapId !== p.mapId || q.dead) continue;
+          if (!nearBuilding(q, 'exchange')) continue;
+          near.push({ id: q.id, name: q.name, cls: q.cls, lvl: q.lvl, busy: !!q.tradeId });
+        }
+        send(ws, { t: 'trade', act: 'who', list: near, me: nearBuilding(p, 'exchange') });
+        break;
+      }
+      if (act === 'invite') {
+        if (!nearBuilding(p, 'exchange')) { send(ws, { t: 'msg', msg: '請靠近交易所！' }); return; }
+        if (p.tradeId) { send(ws, { t: 'msg', msg: '你已經在交易中。' }); return; }
+        const q = players.get(String(m.to));
+        if (!q || !q.ws || q.mapId !== p.mapId || q.dead) { send(ws, { t: 'msg', msg: '找不到這位玩家。' }); return; }
+        if (q.tradeId) { send(ws, { t: 'msg', msg: '對方正在交易中。' }); return; }
+        if (!nearBuilding(q, 'exchange')) { send(ws, { t: 'msg', msg: '對方不在交易所。' }); return; }
+        p.inviteTo = q.id; p.inviteAt = now();
+        send(q.ws, { t: 'trade', act: 'invited', from: { id: p.id, name: p.name, cls: p.cls, lvl: p.lvl } });
+        send(ws, { t: 'msg', msg: `已送出交易邀請給 ${q.name}，等待對方接受…` });
+        break;
+      }
+      if (act === 'accept') {
+        const q = players.get(String(m.from));
+        if (!q || !q.ws || q.inviteTo !== p.id || now() - (q.inviteAt || 0) > 60000) {
+          send(ws, { t: 'msg', msg: '交易邀請已失效。' }); return;
+        }
+        if (p.tradeId || q.tradeId) { send(ws, { t: 'msg', msg: '有人已經在交易中。' }); return; }
+        q.inviteTo = null;
+        const tr = { id: 't' + (tradeSeq++), a: { p: q, items: [], gold: 0, ok: false }, b: { p, items: [], gold: 0, ok: false } };
+        trades.set(tr.id, tr);
+        q.tradeId = tr.id; p.tradeId = tr.id;
+        pushTrade(tr);
+        break;
+      }
+      if (act === 'decline') {
+        const q = players.get(String(m.from));
+        if (q && q.ws) { q.inviteTo = null; send(q.ws, { t: 'msg', msg: `${p.name} 拒絕了交易。` }); }
+        break;
+      }
+      const tr = tradeOf(p);
+      if (!tr) break;
+      if (act === 'offer') {
+        const side = tradeSideOf(tr, p);
+        const wanted = Array.isArray(m.items) ? m.items.slice(0, G.TRADE_SLOTS) : [];
+        side.items = wanted.filter((u) => {
+          const it = p.inv.find((x) => x.uid === u);
+          return it && it.kind === 'equip' && !it.untradeable;
+        });
+        side.gold = clamp(Math.floor(+m.gold || 0), 0, p.gold);
+        tr.a.ok = false; tr.b.ok = false;      // 內容一變，雙方確認全部歸零
+        pushTrade(tr);
+        break;
+      }
+      if (act === 'ok') {
+        tradeSideOf(tr, p).ok = !!m.ok;
+        pushTrade(tr);
+        if (tr.a.ok && tr.b.ok) settleTrade(tr);
+        break;
+      }
+      if (act === 'cancel') { endTrade(tr, `${p.name} 取消了交易。`); break; }
+      break;
+    }
+
     case 'portal': {
       if (m.dir === 'next' && md.portalNext) {
         if (dist2(p.x, p.y, md.portalNext.x, md.portalNext.y) > 170 * 170) return;
@@ -946,6 +1186,7 @@ function handleAction(ws, m) {
 }
 
 function movePlayerToMap(p, mapId, how) {
+  const tr = tradeOf(p); if (tr) endTrade(tr, '有人離開了交易所，交易取消。');
   p.mapId = mapId;
   const md = G.MAPS[mapId];
   let at;
@@ -1039,6 +1280,7 @@ wss.on('connection', (ws, req) => {
     if (ws.player) {
       persist(ws);
       const p = ws.player;
+      const tr0 = tradeOf(p); if (tr0) endTrade(tr0, '對方已離線，交易取消。');
       players.delete(p.id);
       broadcastMap(p.mapId, { t: 'bye', id: p.id });
       for (const w of world) w.guards = w.guards.filter((g) => g.targetId !== p.id);
@@ -1055,10 +1297,8 @@ function charSummary(c) { return { name: c.name, cls: c.cls, lvl: c.lvl }; }
 /* 全服線上玩家名單 */
 function rosterPayload() {
   const list = [];
-  for (const ws of sockets) {
-    const p = ws.player;
-    if (!p) continue;
-    list.push({ id: p.id, name: p.name, cls: p.cls, lvl: p.lvl, map: p.mapId, dead: !!p.dead });
+  for (const p of allPlayers()) {
+    list.push({ id: p.id, name: p.name, cls: p.cls, lvl: p.lvl, map: p.mapId, dead: !!p.dead, bot: p.bot ? 1 : 0 });
   }
   list.sort((a, b) => b.lvl - a.lvl || a.name.localeCompare(b.name));
   return { t: 'roster', list };
@@ -1069,8 +1309,135 @@ function enterWorld(ws, p) {
   players.set(p.id, p);
   send(ws, { t: 'enter', you: p.id, mapId: p.mapId, name: p.name, cls: p.cls });
   if (chatHistory.length) send(ws, { t: 'chatHistory', lines: chatHistory.slice(-25) });
+  send(ws, { t: 'market', list: marketList() });
   broadcastAll({ t: 'chat', sys: 1, msg: `【${p.name}】上線了` });
   setTimeout(pushRoster, 50);
+}
+
+/* ================= 假人（每區一名 AI 陪玩） =================
+   規則：等級固定＝該區建議等級中間值、不升級、沒有裝備、
+   會打怪也會放技能、被玩家主動攻擊就反擊、死後 1 分鐘復活、
+   會出現在「線上玩家」名單裡。                                   */
+function botHome(mapId) {
+  if (mapId === 3) return { x: G.SCHOOL.spawn.x, y: G.SCHOOL.spawn.y };
+  // 城鎮東門外的獵場，離城鎮一段距離
+  return { x: G.TOWN.x1 + 700, y: G.TOWN.cy };
+}
+function spawnBot(def) {
+  const lvl = G.MAPS[def.map].dummyLvl || 25;
+  const home = botHome(def.map);
+  const spot = randomOpenSpot(def.map, (x, y) =>
+    !inTown(def.map, x, y) && dist2(x, y, home.x, home.y) < 1400 * 1400);
+  const b = {
+    id: def.id, name: def.name, cls: def.cls, bot: true, lvl, xp: 0, gold: 0,
+    mapId: def.map, x: spot.x, y: spot.y, dir: 1,
+    inv: [], equip: { weapon: null, helmet: null, chest: null, legs: null, boots: null, cape: null },
+    arrows: 999999, potions: 0, scrolls: 0, keys: 0, keyPity: 0, flags: {},
+    hp: 0, atkAt: 0, potionAt: 0, skillAt: [0, 0], dead: false,
+    input: { dx: 0, dy: 0 }, lastHurt: 0, guardUntil: 0, poison: null,
+    hx: spot.x, hy: spot.y, wanderAt: 0, wx: spot.x, wy: spot.y,
+    grudgeId: null, grudgeUntil: 0, respawnAt: 0
+  };
+  b.hp = calcStats(b).maxHp;
+  return b;
+}
+G.DUMMIES.forEach((d) => bots.push(spawnBot(d)));
+
+function botTick(b, t) {
+  if (b.dead) {
+    if (t >= b.respawnAt) {
+      const fresh = spawnBot(G.DUMMIES.find((d) => d.id === b.id));
+      Object.assign(b, fresh, { dead: false });
+      ev(b.mapId, 'heal', { id: b.id, x: b.x, y: b.y });
+      pushRoster();
+    }
+    return;
+  }
+  const c = G.CLASSES[b.cls];
+  const st = calcStats(b);
+  if (b.hp > st.maxHp) b.hp = st.maxHp;
+  // 脫戰回血
+  if (t - (b.lastHurt || 0) > 5000 && b.hp < st.maxHp) b.hp = Math.min(st.maxHp, b.hp + st.maxHp * 0.02);
+
+  // 中毒
+  if (b.poison && t >= b.poison.nextAt) {
+    b.poison.nextAt += 1000; b.poison.left--;
+    damagePlayer(b, b.poison.dmg, { type: 'poison' });
+    if (b.poison && b.poison.left <= 0) b.poison = null;
+    if (b.dead) return;
+  }
+
+  // ---- 選目標：先報仇（被主動攻擊的玩家），否則找最近的怪 ----
+  let tx = null, ty = null, targetKind = null, targetRef = null, tdist = Infinity;
+  if (b.grudgeId && t < b.grudgeUntil) {
+    const foe = players.get(b.grudgeId);
+    if (foe && !foe.dead && foe.mapId === b.mapId) {
+      const d = Math.hypot(foe.x - b.x, foe.y - b.y);
+      if (d < 900) { tx = foe.x; ty = foe.y; tdist = d; targetKind = 'player'; targetRef = foe; }
+    } else { b.grudgeId = null; }
+  }
+  if (!targetKind) {
+    for (const mob of world[b.mapId].mobs) {
+      if (mob.dead || mob.boss) continue;               // 假人不打 BOSS
+      if (b.ignore && b.ignore[mob.uid] > t) continue;   // 剛剛卡住過的目標，先跳過
+      const d = Math.hypot(mob.x - b.x, mob.y - b.y);
+      if (d >= tdist || d >= 900) continue;
+      if (!G.hasLOS(b.mapId, b.x, b.y, mob.x, mob.y)) continue;   // 隔著地形就不追
+      tdist = d; tx = mob.x; ty = mob.y; targetKind = 'mob'; targetRef = mob;
+    }
+  }
+
+  if (targetKind) {
+    const ang = Math.atan2(ty - b.y, tx - b.x);
+    const aim = { x: Math.cos(ang), y: Math.sin(ang) };
+    const reach = c.range * 0.8;
+    if (tdist > reach) {
+      const nx = b.x + Math.cos(ang) * c.speed * 0.85 * (TICK / 1000);
+      const ny = b.y + Math.sin(ang) * c.speed * 0.85 * (TICK / 1000);
+      const r = tryMove(b.mapId, b.x, b.y, nx, ny);
+      if (Math.abs(r.x - b.x) < 0.5 && Math.abs(r.y - b.y) < 0.5) {
+        // 卡在地形上：放棄這個目標幾秒，改去別的地方（避免站著挨打）
+        b.stuck = (b.stuck || 0) + 1;
+        if (b.stuck > 8) {
+          b.stuck = 0; b.wanderAt = 0;
+          if (targetRef && targetRef.uid) { b.ignore = b.ignore || {}; b.ignore[targetRef.uid] = t + 8000; }
+          targetKind = null;
+        }
+      } else b.stuck = 0;
+      b.x = r.x; b.y = r.y;
+    } else b.stuck = 0;
+  }
+  if (targetKind) {
+    const ang = Math.atan2(ty - b.y, tx - b.x);
+    const aim = { x: Math.cos(ang), y: Math.sin(ang) };
+    b.dir = tx > b.x ? 1 : -1;
+    if (tdist < c.range * 1.15) {
+      // 技能優先，冷卻中才普攻
+      const skills = G.SKILLS[b.cls] || [];
+      let cast = false;
+      for (let i = 0; i < skills.length; i++) {
+        if (t - b.skillAt[i] >= skills[i].cd) { castSkill(b, i, aim); cast = true; break; }
+      }
+      if (!cast) playerAttack(b, aim);
+    }
+  } else {
+    // 沒目標 → 在自己的獵場閒晃
+    if (t > b.wanderAt) {
+      b.wanderAt = t + rnd(1500, 3500);
+      const spot = randomOpenSpot(b.mapId, (x, y) =>
+        !inTown(b.mapId, x, y) && dist2(x, y, b.hx, b.hy) < 900 * 900);
+      b.wx = spot.x; b.wy = spot.y;
+    }
+    const d = Math.hypot(b.wx - b.x, b.wy - b.y);
+    if (d > 12) {
+      const nx = b.x + ((b.wx - b.x) / d) * c.speed * 0.6 * (TICK / 1000);
+      const ny = b.y + ((b.wy - b.y) / d) * c.speed * 0.6 * (TICK / 1000);
+      const r = tryMove(b.mapId, b.x, b.y, nx, ny);
+      if (r.x === b.x && r.y === b.y) b.wanderAt = 0;
+      b.x = r.x; b.y = r.y;
+      b.dir = b.wx > b.x ? 1 : -1;
+    }
+  }
 }
 
 /* ---------------- 私有狀態 ---------------- */
@@ -1113,6 +1480,9 @@ setInterval(() => {
     }
   }
 
+  // ---- 假人 AI ----
+  for (const b of bots) { try { botTick(b, t); } catch (e) { /* 單一假人出錯不影響世界 */ } }
+
   world.forEach((w, mapId) => {
     const md = G.MAPS[mapId];
     // ---- 怪物 AI ----
@@ -1129,9 +1499,8 @@ setInterval(() => {
       }
       let target = null, bd = Infinity;
       const aggro = mob.boss ? 360 : 220;
-      for (const ws of sockets) {
-        const p = ws.player;
-        if (!p || p.dead || p.mapId !== mapId) continue;
+      for (const p of allPlayers()) {
+        if (p.dead || p.mapId !== mapId) continue;
         if (mob.boss) {
           // BOSS 只守衛自己的領地
           if (dist2(p.x, p.y, mob.hx, mob.hy) > 380 * 380) continue;
@@ -1219,9 +1588,8 @@ setInterval(() => {
             gone = true; break;
           }
         }
-        if (!gone) for (const ws of sockets) {
-          const q = ws.player;
-          if (!q || q.dead || q.mapId !== mapId || q.id === pr.owner) continue;
+        if (!gone) for (const q of allPlayers()) {
+          if (q.dead || q.mapId !== mapId || q.id === pr.owner) continue;
           if (dist2(pr.x, pr.y, q.x, q.y) < 30 * 30) {
             if (pr.bomb) exploded = true;
             else if (owner) damagePlayer(q, pr.dmg, { type: 'player', ref: owner });
@@ -1261,9 +1629,8 @@ setInterval(() => {
   const t = now();
   world.forEach((w, mapId) => {
     const ps = [];
-    for (const ws of sockets) {
-      const p = ws.player;
-      if (!p || p.mapId !== mapId) continue;
+    for (const p of allPlayers()) {
+      if (p.mapId !== mapId) continue;
       const vis = {};
       for (const s of G.SLOTS) {
         const it = p.equip[s];
@@ -1273,7 +1640,7 @@ setInterval(() => {
         id: p.id, name: p.name, cls: p.cls, lvl: p.lvl,
         x: Math.round(p.x), y: Math.round(p.y), dir: p.dir,
         hp: Math.ceil(p.hp), maxHp: calcStats(p).maxHp,
-        dead: p.dead, vis, wanted: p.guardUntil > t
+        dead: p.dead, vis, wanted: p.guardUntil > t, bot: p.bot ? 1 : 0
       });
     }
     const mobs = w.mobs.filter((m) => !m.dead).map((m) => ({

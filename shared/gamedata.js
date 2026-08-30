@@ -10,7 +10,7 @@
   // ---------- 等級經驗 ----------
   function xpNeed(lvl) { return Math.floor(30 * Math.pow(lvl, 1.5)); }
   function mobXP(lvl)  { return Math.floor(12 * Math.pow(lvl, 1.6)); }
-  const LEVEL_CAP = 300;
+  const LEVEL_CAP = 350;
 
   // ---------- 職業 ----------
   const CLASSES = {
@@ -89,6 +89,33 @@
   const POTION_CD = 30000;
   const POTION_HEAL = 0.2;
 
+  /* ---------- 回收 / 二手市集 / 交易所 ----------
+     鐵匠鋪回收價＝階級底價 × 稀有度倍率 × 武器加成 × 強化加成
+     （刻意低於玩家之間的行情，想賣好價錢就去二手商店掛單） */
+  const SELL_TIER_BASE = { novice: 120, rock: 900, steel: 5000, dark: 22000, mithril: 45000, dragon: 130000 };
+  const SELL_QUALITY_MUL = [1, 1.5, 2.2, 3.5, 6, 10, 18];   // 灰 綠 藍 紫 金 紅 彩
+  function sellPrice(item) {
+    if (!item || item.kind !== 'equip') return 0;
+    const base = SELL_TIER_BASE[item.tier] || 100;
+    const qm = SELL_QUALITY_MUL[item.q || 0] || 1;
+    const wm = item.slot === 'weapon' ? 1.5 : 1;
+    const pm = 1 + (item.plus || 0) * 0.15;
+    return Math.max(10, Math.round(base * qm * wm * pm / 10) * 10);
+  }
+  const MARKET_MIN_BOSS = 1500000;   // BOSS 掉落裝上架最低售價
+  const MARKET_MAX_PRICE = 2000000000;
+  const MARKET_SLOTS = 8;            // 每個角色最多同時掛 8 件
+  const TRADE_SLOTS = 6;             // 交易所每人最多放 6 件
+
+  // ---------- 假人（每區一名 AI 陪玩，等級＝該區建議等級中間值） ----------
+  const DUMMIES = [
+    { id: 'bot0', name: '雪羽',   cls: 'warrior',  map: 0 },
+    { id: 'bot1', name: '夜語',   cls: 'archer',   map: 1 },
+    { id: 'bot2', name: '灰燼',   cls: 'assassin', map: 2 },
+    { id: 'bot3', name: '守夜人', cls: 'warrior',  map: 3 }
+  ];
+  const DUMMY_RESPAWN = 60000;       // 死後 1 分鐘復活
+
   // ---------- 怪物 ----------
   function mobHP(lvl)  { return Math.floor(40 + lvl * 22); }
   function mobATK(lvl) { return Math.floor(3 + lvl * 0.55); }
@@ -99,59 +126,63 @@
     spider:   { name: '蜘蛛',     lvl: 100, sprite: 'spider',   gold: [3000, 4000],    speed: 120, size: 42 },
     imp:      { name: '小惡魔',   lvl: 200, sprite: 'imp',      gold: [7000, 10000],   speed: 140, size: 44 },
     skeleton: { name: '小骷髏',   lvl: 250, sprite: 'skeleton', gold: [10000, 20000],  speed: 115, size: 46 },
-    golem:    { name: '岩石魔像', lvl: 50,  sprite: 'golem',  boss: 'mini',  mul: 3, gold: [10000, 50000],
+    golem:    { name: '岩石魔像', lvl: 50,  sprite: 'golem',  boss: 'mini',  mul: 4.2, dropQ: 4, dropN: [2, 3], gold: [10000, 50000],
                 gearTier: 'rock', speed: 90,  size: 96,  respawn: 300000, memento: { id:'m_golem', name:'岩石核心', desc:'首次擊敗岩石魔像的證明（不可交易）' } },
-    cultist:  { name: '黑暗信徒', lvl: 150, sprite: 'cultist', boss: 'mini', mul: 3, gold: [100000, 150000],
+    cultist:  { name: '黑暗信徒', lvl: 150, sprite: 'cultist', boss: 'mini', mul: 4.2, dropQ: 5, dropN: [2, 3], gold: [100000, 150000],
                 gearTier: 'dark', speed: 120, size: 86,  respawn: 300000, memento: { id:'m_cultist', name:'黑暗聖章', desc:'首次擊敗黑暗信徒的證明（不可交易）' } },
-    dragon:   { name: '龍領主 伊格尼斯', lvl: 300, sprite: 'dragon', boss: 'grand', mul: 5, gold: [500000, 1000000],
+    dragon:   { name: '龍領主 伊格尼斯', lvl: 300, sprite: 'dragon', boss: 'grand', mul: 7, dropQ: 6, dropN: [3, 4], gold: [500000, 1000000],
                 gearTier: 'dragon', speed: 105, size: 150, respawn: 600000 }
   };
   const MOB_RESPAWN = 5000;
   const XP_MUL_MINI = 5, XP_MUL_GRAND = 8;
-  const MOB_COUNT_EACH = 15;
+  const MOB_COUNT_EACH = 40;   // 每種小怪 15 → 40（+25）
 
   /* ============================================================
      地圖（主要地圖比例 1:4000，城鎮 1:200，學園 1:500）
      ============================================================ */
   const TILE = 40;
+  // 地圖 0~2（打怪區＋城鎮）尺寸全面放大 2 倍；大 BOSS 所在的中崙學園維持原尺寸
   const MAPS = [
-    { id: 0, name: '碎裂之峰（建議 1-50 級）',   theme: 'peak',    w: 3400, h: 2400,
-      mobs: ['slime', 'goblin'], boss: 'golem',
-      townName: '白霜城', chestN: 6,
-      landmark: { x: 2160, y: 560, r: 190, name: '符文祭壇' },
-      bossArena: { x: 2960, y: 2010, r: 260, name: '魔像深谷' },
-      portalPrev: null, portalNext: { x: 3180, y: 1180 } },
-    { id: 1, name: '黑暗聖殿（建議 50-150 級）', theme: 'sanctum', w: 3400, h: 2400,
-      mobs: ['bat', 'spider'], boss: 'cultist',
-      townName: '暗影堡', chestN: 6,
-      landmark: { x: 2160, y: 560, r: 190, name: '魔法祭壇' },
-      bossArena: { x: 2960, y: 2010, r: 260, name: '黑暗聖所' },
-      portalPrev: { x: 180, y: 1180 }, portalNext: { x: 3180, y: 1180 } },
-    { id: 2, name: '火山王座（建議 150-300 級）', theme: 'volcano', w: 3400, h: 2400,
-      mobs: ['imp', 'skeleton'], boss: null,
-      townName: '燼火鎮', chestN: 8,
-      landmark: { x: 2160, y: 560, r: 190, name: '岩石王座' },
-      portalPrev: { x: 180, y: 1180 }, portalNext: null,
-      centerPortal: { x: 1780, y: 1180, name: '古代火山傳送門' } },
+    { id: 0, name: '碎裂之峰（建議 1-50 級）',   theme: 'peak',    w: 6800, h: 4800,
+      mobs: ['slime', 'goblin'], boss: 'golem', dummyLvl: 25,
+      townName: '白霜城', chestN: 10,
+      landmark: { x: 4320, y: 1120, r: 380, name: '符文祭壇' },
+      bossArena: { x: 5920, y: 4020, r: 520, name: '魔像深谷' },
+      portalPrev: null, portalNext: { x: 6360, y: 2360 } },
+    { id: 1, name: '黑暗聖殿（建議 50-150 級）', theme: 'sanctum', w: 6800, h: 4800,
+      mobs: ['bat', 'spider'], boss: 'cultist', dummyLvl: 100,
+      townName: '暗影堡', chestN: 10,
+      landmark: { x: 4320, y: 1120, r: 380, name: '魔法祭壇' },
+      bossArena: { x: 5920, y: 4020, r: 520, name: '黑暗聖所' },
+      portalPrev: { x: 360, y: 2360 }, portalNext: { x: 6360, y: 2360 } },
+    { id: 2, name: '火山王座（建議 150-350 級）', theme: 'volcano', w: 6800, h: 4800,
+      mobs: ['imp', 'skeleton'], boss: null, dummyLvl: 225,
+      townName: '燼火鎮', chestN: 14,
+      landmark: { x: 4320, y: 1120, r: 380, name: '岩石王座' },
+      portalPrev: { x: 360, y: 2360 }, portalNext: null,
+      centerPortal: { x: 3560, y: 2360, name: '古代火山傳送門' } },
     { id: 3, name: '中崙學園・王的領域', theme: 'school', w: 2240, h: 1600,
-      mobs: [], boss: 'dragon',
+      mobs: [], boss: 'dragon', dummyLvl: 325,
       townName: null, chestN: 3,
       portalPrev: { x: 1120, y: 1460 }, portalNext: null }
   ];
 
-  // 城鎮版型（地圖 0-2 共用座標；城牆、兩個城門、五棟建築、復活點、BOSS 大空間）
+  // 城鎮版型（地圖 0-2 共用座標，已放大 2 倍）
+  // 城牆、兩個城門、六棟建築（裝備店・雜貨・鐵匠・旅店・二手商店・交易所）、復活點、BOSS 大空間
   const TOWN = {
-    cx: 780, cy: 1180, w: 920, h: 680,           // 城牆外框（px，含牆）
-    x0: 320, y0: 840, x1: 1240, y1: 1520,
-    gateY0: 1120, gateY1: 1240,                   // 西門與東門的開口（兩個出口）
+    cx: 1560, cy: 2360, w: 1840, h: 1360,          // 城牆外框（px，含牆）
+    x0: 640, y0: 1680, x1: 2480, y1: 3040,
+    gateY0: 2240, gateY1: 2480,                    // 西門與東門的開口（兩個出口）
     buildings: [
-      { key: 'gear',  label: '裝備店',   icon: '⚔', x: 500, y: 980,  w: 150, h: 110 },
-      { key: 'shop',  label: '雜貨商店', icon: '🏪', x: 740, y: 980,  w: 150, h: 110 },
-      { key: 'smith', label: '鐵匠鋪',   icon: '🔨', x: 500, y: 1380, w: 150, h: 110 },
-      { key: 'inn',   label: '住宿旅店', icon: '🛏', x: 740, y: 1380, w: 150, h: 110 }
+      { key: 'gear',     label: '裝備店',   icon: '⚔',  x: 900,  y: 1930, w: 180, h: 130 },
+      { key: 'shop',     label: '雜貨商店', icon: '🏪', x: 1290, y: 1930, w: 180, h: 130 },
+      { key: 'smith',    label: '鐵匠鋪',   icon: '🔨', x: 1680, y: 1930, w: 180, h: 130 },
+      { key: 'inn',      label: '住宿旅店', icon: '🛏', x: 900,  y: 2790, w: 180, h: 130 },
+      { key: 'market',   label: '二手商店', icon: '🏬', x: 1290, y: 2790, w: 180, h: 130 },
+      { key: 'exchange', label: '交易所',   icon: '💱', x: 1680, y: 2790, w: 180, h: 130 }
     ],
-    statue: { x: 620, y: 1170 },                  // 莊嚴的復活點
-    plaza:  { x: 1050, y: 1170, r: 150 }          // BOSS 出現大空間
+    statue: { x: 1240, y: 2360 },                  // 莊嚴的復活點
+    plaza:  { x: 2150, y: 2360, r: 260 }           // BOSS 出現大空間
   };
 
   // 中崙學園版型（1:500，參考中崙高中平面圖；王的位置＝707 班）
@@ -276,6 +307,20 @@
       // 外框
       for (let x = 0; x < tw; x++) { g[at(x, 0)] = 1; g[at(x, 1)] = 1; g[at(x, th - 1)] = 1; g[at(x, th - 2)] = 1; }
       for (let y = 0; y < th; y++) { g[at(0, y)] = 1; g[at(1, y)] = 1; g[at(tw - 1, y)] = 1; g[at(tw - 2, y)] = 1; }
+      // --- 封掉走不到的孤島（避免怪物／寶箱生在玩家到不了的死角） ---
+      {
+        const sx = Math.floor(TOWN.statue.x / TILE), sy = Math.floor(TOWN.statue.y / TILE);
+        const seen = new Uint8Array(tw * th);
+        const stk = [sy * tw + sx]; seen[sy * tw + sx] = 1;
+        while (stk.length) {
+          const i = stk.pop(), x = i % tw, y = (i / tw) | 0;
+          if (x > 0 && !seen[i - 1] && !g[i - 1]) { seen[i - 1] = 1; stk.push(i - 1); }
+          if (x < tw - 1 && !seen[i + 1] && !g[i + 1]) { seen[i + 1] = 1; stk.push(i + 1); }
+          if (y > 0 && !seen[i - tw] && !g[i - tw]) { seen[i - tw] = 1; stk.push(i - tw); }
+          if (y < th - 1 && !seen[i + tw] && !g[i + tw]) { seen[i + tw] = 1; stk.push(i + tw); }
+        }
+        for (let i = 0; i < g.length; i++) if (!g[i] && !seen[i]) g[i] = 1;
+      }
     } else {
       // --- 中崙學園：開放校園 + 建築障礙 ---
       g.fill(0);
@@ -338,6 +383,8 @@
     SLOTS, SLOT_NAMES, GEAR_TIERS, WEAPON_SUFFIX,
     ENHANCE_RATES, ENHANCE_SAFE, ENHANCE_BONUS, SCROLL_PRICE, POTION_PRICE, ARROW_PRICE, INN_PRICE, POTION_CD, POTION_HEAL,
     mobHP, mobATK, MOBS, MOB_RESPAWN, XP_MUL_MINI, XP_MUL_GRAND, MOB_COUNT_EACH,
+    SELL_TIER_BASE, SELL_QUALITY_MUL, sellPrice,
+    MARKET_MIN_BOSS, MARKET_MAX_PRICE, MARKET_SLOTS, TRADE_SLOTS, DUMMIES, DUMMY_RESPAWN,
     TILE, MAPS, TOWN, SCHOOL, KEYS_NEEDED, KEY_CHANCE, KEY_PITY, KEY_NAME,
     mulberry32, getGrid, blockedAt, hasLOS, inTownRect,
     PVP_DROP_CHANCE, PVP_LEVEL_RANGE, GUARD_COUNT, GUARD_DURATION, CHEST_RESPAWN

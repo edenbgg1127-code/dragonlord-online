@@ -286,9 +286,14 @@ function handle(m) {
   switch (m.t) {
     case 'auth':
       if (!m.ok) { $('#auth-err').textContent = m.msg; return; }
+      if (m.back) leaveToCharSelect();
       showCharScreen(m.chars || []);
       break;
     case 'charErr': $('#char-err').textContent = m.msg; break;
+    case 'kicked':
+      alert(m.msg || '連線已中斷');
+      location.reload();
+      break;
     case 'enter':
       myId = m.you; myCls = m.cls; myName = m.name; mapId = m.mapId;
       me.snapped = false;
@@ -316,6 +321,8 @@ function handle(m) {
       updateHUD();
       if (!$('#bag').classList.contains('hidden')) renderBag();
       if (!$('#smith').classList.contains('hidden')) renderSmith();
+      if (!$('#shop').classList.contains('hidden')) renderShop();
+      if (!$('#gearshop').classList.contains('hidden')) refreshGearShop();
       break;
     case 'ev': handleEvent(m); break;
     case 'msg':
@@ -325,23 +332,86 @@ function handle(m) {
     case 'loot': toast('💰 +' + m.gold.toLocaleString() + ' 金幣'); SND.coin(); break;
     case 'memento': announce('🏅 獲得首殺紀念道具【' + m.name + '】！已放入背包'); SND.level(); break;
     case 'announce': announce(m.msg); break;
-    case 'chat': {
-      const d = document.createElement('div'); d.className = 'c';
-      d.innerHTML = '<b>' + esc(m.name) + '</b>：' + esc(m.msg);
-      const log = $('#chatlog'); log.appendChild(d);
-      while (log.children.length > 8) log.firstChild.remove();
-      setTimeout(() => d.remove(), 15000);
-      break;
-    }
+    case 'chat': addChat(m); break;
+    case 'chatHistory': (m.lines || []).forEach((l) => addChat(l, true)); break;
+    case 'roster': roster = m.list || []; $('#onlinen').textContent = roster.length + ' 人';
+      if (!$('#players').classList.contains('hidden')) renderRoster(); break;
     case 'dead': dead = true; $('#deathview').classList.remove('hidden'); SND.die(); break;
     case 'enhance': {
       const fx = $('#enhfx');
       if (m.ok) { fx.textContent = '✨ 強化成功！【' + m.name + '】 → +' + m.plus; fx.style.color = '#8fd98f'; SND.enhOk(); }
+      else if (m.safe) { fx.textContent = '🛡 強化失敗，但 +' + GAME.ENHANCE_SAFE + ' 以下不會降級（維持 +' + m.plus + '）'; fx.style.color = '#8db8f0'; SND.enhFail(); }
       else { fx.textContent = '💥 強化失敗…【' + m.name + '】 → +' + m.plus; fx.style.color = '#ff8a80'; SND.enhFail(); shake(8); }
       break;
     }
   }
 }
+
+/* ---------------- 全服聊天 ---------------- */
+const chatLines = [];
+function chatOpen() { return !$('#chatpanel').classList.contains('hidden'); }
+function addChat(m, quiet) {
+  chatLines.push(m);
+  if (chatLines.length > 80) chatLines.shift();
+  renderChat();
+  if (!quiet) {
+    if (!chatOpen()) {
+      $('#chatdot').classList.remove('hidden');
+      if (!m.sys) toast('💬 ' + m.name + '：' + m.msg, 5000);
+    }
+    if (!m.sys) SND.pick();
+  }
+}
+function renderChat() {
+  const feed = $('#chatfeed');
+  if (!feed) return;
+  const atBottom = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 30;
+  feed.innerHTML = chatLines.map((m) => m.sys
+    ? `<div class="ln sys">📢 ${esc(m.msg)}</div>`
+    : `<div class="ln${m.name === myName ? ' me' : ''}"><span class="zn">[${esc(m.zone || '')}]</span>
+       <span class="nm">${esc(m.name)}</span>：${esc(m.msg)}</div>`).join('');
+  if (atBottom) feed.scrollTop = feed.scrollHeight;
+}
+function openChat() {
+  togglePanel('chatpanel', true);
+  $('#chatdot').classList.add('hidden');
+  renderChat();
+  $('#chatfeed').scrollTop = $('#chatfeed').scrollHeight;
+  setTimeout(() => $('#chatinput').focus(), 60);
+}
+function sendChat() {
+  const el = $('#chatinput');
+  const v = el.value.trim();
+  if (v) send({ t: 'chat', msg: v });
+  el.value = '';
+}
+
+/* ---------------- 線上玩家列表 ---------------- */
+let roster = [];
+const CLS_COLOR = { warrior: '#8db8f0', archer: '#8fd98f', assassin: '#c39bec' };
+function renderRoster() {
+  const box = $('#plist');
+  $('#ptotal').textContent = `（共 ${roster.length} 人在線）`;
+  if (!roster.length) { box.innerHTML = '<div style="color:#8b90a8;font-size:13px">目前沒有其他玩家在線上</div>'; return; }
+  const groups = {};
+  for (const p of roster) (groups[p.map] = groups[p.map] || []).push(p);
+  let html = '';
+  Object.keys(groups).sort((a, b) => a - b).forEach((mi) => {
+    const zone = GAME.MAPS[mi].name.split('（')[0];
+    html += `<div class="zonehd">📍 ${zone}<span class="cnt">${groups[mi].length} 人</span><span class="bar2"></span></div>`;
+    for (const p of groups[mi]) {
+      html += `<div class="prow${p.id === myId ? ' self' : ''}">
+        <span class="cdot" style="background:${CLS_COLOR[p.cls]}"></span>
+        <span class="lv">Lv.${p.lvl}</span>
+        <span class="pn">${esc(p.name)}${p.id === myId ? ' <span style="color:var(--gold);font-size:11px">（你）</span>' : ''}</span>
+        <span class="cl">${GAME.CLASSES[p.cls].name}</span>
+        ${p.dead ? '<span class="st">💀 陣亡</span>' : ''}
+      </div>`;
+    }
+  });
+  box.innerHTML = html;
+}
+function openPlayers() { togglePanel('players', true); renderRoster(); }
 
 /* ---------------- 特效 ---------------- */
 let effects = [], shakeAmt = 0;
@@ -443,9 +513,27 @@ $('#btn-create').onclick = () => {
   if (!selCls) { $('#char-err').textContent = '請先選擇職業'; return; }
   send({ t: 'createChar', cls: selCls, name: $('#in-charname').value });
 };
+function leaveToCharSelect() {
+  myId = null; myCls = null; meData = null; stCur = stPrev = null; mapCanvas = null;
+  dead = false; auto = false; selUid = null; enhUid = null; bagSig = ''; smithSig = ''; roster = [];
+  $('#autobtn').classList.remove('on');
+  $('#hud').classList.add('hidden');
+  $('#deathview').classList.add('hidden');
+  PANELS.forEach((p2) => $('#' + p2).classList.add('hidden')); syncScrim();
+  tooltip.classList.add('hidden');
+  for (const k in keys) keys[k] = false;
+  moveSent = '';
+  ctx.clearRect(0, 0, W, H);
+}
 function showCharScreen(chars) {
   $('#screen-login').classList.add('hidden');
   $('#screen-char').classList.remove('hidden');
+  $('#char-err').textContent = '';
+  const full = chars.length >= 3;
+  $('#charcount').textContent = full ? `— 角色已滿（${chars.length}/3），請選擇上方角色 —` : `— 建立新角色（${chars.length}/3）—`;
+  $('#clsrow').classList.toggle('hidden', full);
+  $('#in-charname').classList.toggle('hidden', full);
+  $('#btn-create').classList.toggle('hidden', full);
   const list = $('#charlist'); list.innerHTML = '';
   chars.forEach((c, i) => {
     const d = document.createElement('div'); d.className = 'charrow';
@@ -475,12 +563,13 @@ addEventListener('keydown', (e) => {
   keys[e.key.toLowerCase()] = true;
   const k = e.key.toLowerCase();
   if (k === 'b') togglePanel('bag');
+  if (k === 'p') { if ($('#players').classList.contains('hidden')) openPlayers(); else { $('#players').classList.add('hidden'); syncScrim(); } }
   if (k === 'q') castSkill(0, true);
   if (k === 'e') castSkill(1, true);
   if (k === 'r') usePotion();
   if (k === 'f') doInteract();
-  if (k === 'enter') { const c = $('#chatin'); c.style.display = 'block'; c.focus(); }
-  if (k === 'escape') ['bag', 'shop', 'gearshop', 'smith', 'help'].forEach((p) => $('#' + p).classList.add('hidden'));
+  if (k === 'enter') { e.preventDefault(); openChat(); }
+  if (k === 'escape') closePanels();
   if (k === ' ') { e.preventDefault(); tryAttack(aimAtNearest() || (me.dir > 0 ? { x: 1, y: 0 } : { x: -1, y: 0 })); }
   sendMove();
 });
@@ -531,22 +620,35 @@ function tryAttack(aim) {
 function usePotion() {
   if (meData && meData.potions > 0 && meData.potionCd <= 0) send({ t: 'potion' });
 }
-function nearestEnemy(maxD) {
-  if (!stCur) return null;
-  let best = null, bd = (maxD || 700) ** 2;
-  const ok = (x, y) => GAME.hasLOS(mapId, me.x, me.y, x, y);   // 隔牆的目標不鎖定
+function enemyList(maxD, includePlayers) {
+  if (!stCur) return [];
+  const out = [];
+  const R2 = (maxD || 900) ** 2;
   for (const mb of stCur.mobs) {
     const dd = (mb.x - me.x) ** 2 + (mb.y - me.y) ** 2;
-    if (dd < bd && ok(mb.x, mb.y)) { bd = dd; best = mb; }
+    if (dd < R2) out.push({ x: mb.x, y: mb.y, dd, kind: mb.kind });
   }
   for (const g of stCur.guards) {
     const dd = (g.x - me.x) ** 2 + (g.y - me.y) ** 2;
-    if (dd < bd && ok(g.x, g.y)) { bd = dd; best = g; }
+    if (dd < R2) out.push({ x: g.x, y: g.y, dd });
   }
-  return best;
+  if (includePlayers) for (const pl of stCur.players) {
+    if (pl.id === myId || pl.dead) continue;
+    if (mapId < 3 && GAME.inTownRect(mapId, pl.x, pl.y)) continue;   // 城鎮內不自動打人
+    const px = pl._x !== undefined ? pl._x : pl.x, py = pl._y !== undefined ? pl._y : pl.y;
+    const dd = (px - me.x) ** 2 + (py - me.y) ** 2;
+    if (dd < R2) out.push({ x: px, y: py, dd, player: true });
+  }
+  out.sort((a, b) => a.dd - b.dd);
+  return out;
+}
+function nearestEnemy(maxD, includePlayers) {
+  const list = enemyList(maxD, includePlayers);
+  for (const e of list) if (GAME.hasLOS(mapId, me.x, me.y, e.x, e.y)) return e;
+  return list[0] || null;      // 沒有視線也回傳最近的（讓自動模式去繞路）
 }
 function aimAtNearest() {
-  const e = nearestEnemy(760);
+  const e = nearestEnemy(760, autoPK);
   if (!e) return null;
   // 與伺服器一致：都用「腳底座標」算角度，近距離才不會歪掉（修正自動攻擊打空的問題）
   return { x: e.x - me.x, y: e.y - me.y };
@@ -702,30 +804,110 @@ cv.addEventListener('touchstart', (e) => {
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('contextmenu', (e) => { if (e.target === cv || dpad.contains(e.target)) e.preventDefault(); });
 
-/* ---------------- 自動攻擊 ---------------- */
-let auto = false, autoVec = { x: undefined, y: undefined };
+/* ---------------- 自動攻擊（會自動繞路） ---------------- */
+let auto = false, autoPK = false, autoVec = { x: undefined, y: undefined };
+let path = null, pathAt = 0, pathGoal = null;
+
+/* 在地圖網格上用 BFS 找一條繞開障礙的路徑 */
+function findPath(sx, sy, tx, ty) {
+  const T = GAME.TILE, { g, tw, th } = GAME.getGrid(mapId);
+  const s = [Math.floor(sx / T), Math.floor(sy / T)];
+  const t = [Math.floor(tx / T), Math.floor(ty / T)];
+  if (s[0] === t[0] && s[1] === t[1]) return [];
+  const idx = (x, y) => y * tw + x;
+  if (g[idx(t[0], t[1])]) {                       // 目標在牆裡 → 找旁邊可走格
+    let found = null;
+    for (let r = 1; r <= 3 && !found; r++)
+      for (let dy = -r; dy <= r && !found; dy++)
+        for (let dx = -r; dx <= r && !found; dx++) {
+          const nx = t[0] + dx, ny = t[1] + dy;
+          if (nx > 0 && ny > 0 && nx < tw && ny < th && !g[idx(nx, ny)]) found = [nx, ny];
+        }
+    if (!found) return null;
+    t[0] = found[0]; t[1] = found[1];
+  }
+  const prev = new Int32Array(tw * th).fill(-1);
+  const seen = new Uint8Array(tw * th);
+  const q = [idx(s[0], s[1])];
+  seen[q[0]] = 1;
+  const goal = idx(t[0], t[1]);
+  let head = 0, limit = 9000;
+  while (head < q.length && limit-- > 0) {
+    const cur = q[head++];
+    if (cur === goal) break;
+    const cx = cur % tw, cy = (cur - cx) / tw;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = cx + dx, ny = cy + dy;
+      if (nx < 1 || ny < 1 || nx >= tw - 1 || ny >= th - 1) continue;
+      const ni = idx(nx, ny);
+      if (seen[ni] || g[ni]) continue;
+      seen[ni] = 1; prev[ni] = cur; q.push(ni);
+    }
+  }
+  if (!seen[goal]) return null;
+  const pts = [];
+  for (let cur = goal; cur !== idx(s[0], s[1]) && cur >= 0; cur = prev[cur]) {
+    const cx = cur % tw, cy = (cur - cx) / tw;
+    pts.push({ x: cx * T + T / 2, y: cy * T + T / 2 });
+    if (prev[cur] < 0) break;
+  }
+  pts.reverse();
+  return pts;
+}
 $('#autobtn').onclick = () => {
   auto = !auto;
   $('#autobtn').classList.toggle('on', auto);
+  path = null;
   if (!auto) { autoVec = { x: undefined, y: undefined }; sendMove(); }
 };
+const pkBtn = $('#pkbtn');
+if (pkBtn) pkBtn.onclick = () => {
+  autoPK = !autoPK;
+  pkBtn.classList.toggle('on', autoPK);
+  toast(autoPK ? '⚔ 自動攻擊已包含玩家（PK 模式）' : '🕊 自動攻擊只打怪物');
+};
+
 setInterval(() => {
   if (!auto || !myId || dead || !stCur) return;
-  const manual = keys['w'] || keys['a'] || keys['s'] || keys['d'] || keys['arrowup'] || keys['arrowdown'] || keys['arrowleft'] || keys['arrowright'] || !!dpadVec();
+  const manual = keys['w'] || keys['a'] || keys['s'] || keys['d'] ||
+    keys['arrowup'] || keys['arrowdown'] || keys['arrowleft'] || keys['arrowright'] || !!dpadVec();
+  if (manual) { path = null; return; }
   const c = GAME.CLASSES[myCls];
-  const e = nearestEnemy(820);
-  if (!e) { autoVec = { x: 0, y: 0 }; if (!manual) sendMove(0, 0); return; }
+  const e = nearestEnemy(1100, autoPK);
+  if (!e) { autoVec = { x: 0, y: 0 }; sendMove(0, 0); path = null; return; }
   const d = Math.hypot(e.x - me.x, e.y - me.y);
-  const reach = (c.range >= 200 ? c.range * 0.85 : c.range + (e.kind ? GAME.MOBS[e.kind].size * 0.7 : 20));
-  if (d <= reach) {
-    autoVec = { x: 0, y: 0 };
-    if (!manual) sendMove(0, 0);
+  const reach = (c.range >= 200 ? c.range * 0.8 : c.range + (e.kind ? GAME.MOBS[e.kind].size * 0.7 : 22));
+  const los = GAME.hasLOS(mapId, me.x, me.y, e.x, e.y);
+
+  if (d <= reach && los) {                       // 進入射程且看得到 → 停下攻擊
+    autoVec = { x: 0, y: 0 }; sendMove(0, 0); path = null;
     tryAttack({ x: e.x - me.x, y: e.y - me.y });
-  } else if (!manual) {
-    autoVec = { x: (e.x - me.x) / d, y: (e.y - me.y) / d };
-    sendMove(autoVec.x, autoVec.y);
+    return;
   }
-}, 250);
+  // 需要移動：看得到就直線靠近，看不到就用 BFS 繞路
+  let dirX, dirY;
+  if (los && d > 40) { dirX = (e.x - me.x) / d; dirY = (e.y - me.y) / d; path = null; }
+  else {
+    const nowT2 = performance.now();
+    const goalMoved = !pathGoal || (pathGoal.x - e.x) ** 2 + (pathGoal.y - e.y) ** 2 > 160 * 160;
+    if (!path || !path.length || goalMoved || nowT2 - pathAt > 1500) {
+      path = findPath(me.x, me.y, e.x, e.y);
+      pathAt = nowT2; pathGoal = { x: e.x, y: e.y };
+    }
+    if (!path || !path.length) {                 // 完全走不到 → 直線嘗試
+      dirX = (e.x - me.x) / (d || 1); dirY = (e.y - me.y) / (d || 1);
+    } else {
+      while (path.length && Math.hypot(path[0].x - me.x, path[0].y - me.y) < 34) path.shift();
+      if (!path.length) { path = null; return; }
+      const wp = path[0];
+      const wd = Math.hypot(wp.x - me.x, wp.y - me.y) || 1;
+      dirX = (wp.x - me.x) / wd; dirY = (wp.y - me.y) / wd;
+    }
+  }
+  autoVec = { x: dirX, y: dirY };
+  sendMove(dirX, dirY);
+  if (d <= reach && los) tryAttack({ x: e.x - me.x, y: e.y - me.y });
+}, 220);
 
 /* ---------------- 互動偵測 ---------------- */
 let interact = null;
@@ -773,18 +955,37 @@ function doInteract() {
 function togglePanel(id, forceOpen) {
   const el = $('#' + id);
   const open = el.classList.contains('hidden');
-  if (!open && !forceOpen) { el.classList.add('hidden'); return; }
-  ['bag', 'shop', 'gearshop', 'smith', 'help'].forEach((p) => $('#' + p).classList.add('hidden'));
+  if (!open && !forceOpen) { el.classList.add('hidden'); syncScrim(); return; }
+  PANELS.forEach((p) => $('#' + p).classList.add('hidden'));
   el.classList.remove('hidden');
+  syncScrim();
   if (id === 'bag') renderBag(true);
+  if (id === 'shop') renderShop();
   if (id === 'gearshop') renderGearShop();
   if (id === 'smith') renderSmith(true);
 }
-$$('.x').forEach((x) => x.onclick = () => $('#' + x.dataset.close).classList.add('hidden'));
+const PANELS = ['bag', 'shop', 'gearshop', 'smith', 'help', 'chatpanel', 'players'];
+function closePanels() { PANELS.forEach((p) => $('#' + p).classList.add('hidden')); syncScrim(); }
+function syncScrim() {
+  const any = PANELS.some((p) => !$('#' + p).classList.contains('hidden'));
+  $('#scrim').classList.toggle('hidden', !any);
+}
+$('#scrim').onclick = closePanels;
+$$('.x').forEach((x) => x.onclick = () => { $('#' + x.dataset.close).classList.add('hidden'); syncScrim(); });
 $('#ab-bag').onclick = () => togglePanel('bag');
 $('#ab-pick').onclick = () => doInteract();
 $('#ab-potion').onclick = usePotion;
+$('#ab-chat').onclick = openChat;
+$('#ab-players').onclick = openPlayers;
+$('#chatsend').onclick = () => { sendChat(); $('#chatinput').focus(); };
+$('#chatinput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
+  e.stopPropagation();
+});
 $('#helpbtn').onclick = () => togglePanel('help');
+$('#charbtn').onclick = () => {
+  if (confirm('要回到選擇角色畫面嗎？（進度會先存檔）')) send({ t: 'backToSelect' });
+};
 $('#btn-respawn').onclick = () => send({ t: 'respawn' });
 $$('[data-buy]').forEach((b) => b.onclick = () => send({ t: 'buy', what: b.dataset.buy, n: +(b.dataset.n || 0) }));
 
@@ -901,23 +1102,56 @@ function refreshSelection() {
 $('#btn-equip').onclick = () => { if (selUid) send({ t: 'equip', uid: selUid }); };
 $('#btn-drop').onclick = () => { if (selUid) send({ t: 'drop', uid: selUid }); };
 
+/* ---- 商店共用：持有資源列 ---- */
+function renderWallet(sel, extra) {
+  const m = meData; if (!m) return;
+  const el = $(sel); if (!el) return;
+  el.innerHTML =
+    `<span>💰 <b>${m.gold.toLocaleString()}</b></span><span>🧪 ${m.potions}</span><span>📜 ${m.scrolls}</span>` +
+    (myCls === 'archer' ? `<span>🏹 ${m.arrows.toLocaleString()}</span>` : '') + (extra || '');
+}
+/* ---- 雜貨商店 ---- */
+function renderShop() {
+  if (!meData) return;
+  renderWallet('#shopwallet');
+  // 非射手不顯示箭矢，直式手機少捲一大段
+  $$('#shop .arrowonly').forEach((r) => r.classList.toggle('hidden', myCls !== 'archer'));
+  // 買不起的直接變灰，不用點了才知道
+  $$('#shop [data-buy]').forEach((b) => {
+    const unit = { potion: GAME.POTION_PRICE, scroll: GAME.SCROLL_PRICE, arrows: GAME.ARROW_PRICE }[b.dataset.buy] || 0;
+    b.disabled = meData.gold < unit * (+b.dataset.n || 1);
+  });
+}
 /* ---- 裝備店 ---- */
 function renderGearShop() {
   if (!meData || mapId >= 3) return;
   const tierKey = ['novice', 'steel', 'mithril'][mapId];
   const t = GAME.GEAR_TIERS[tierKey];
-  const list = $('#gearlist'); list.innerHTML =
-    `<div style="font-size:12px;color:#9aa;margin-bottom:8px">本店販售【${t.name}】系列（本區城鎮限定）｜💰 ${meData.gold.toLocaleString()}</div>`;
+  renderWallet('#gearwallet', `<span style="color:#8891a8">本店販售【${t.name}】系列</span>`);
+  const list = $('#gearlist'); list.innerHTML = '';
   GAME.SLOTS.forEach((s) => {
     const name = s === 'weapon' ? GAME.WEAPON_SUFFIX[tierKey][myCls] : t.name + GAME.SLOT_NAMES[s];
     const price = s === 'weapon' ? t.price.weapon : t.price.armor;
-    const stats = s === 'weapon' ? `⚔ +${t.wAtk}` : `🛡 +${t.aDef}　❤ +${t.aHp}`;
+    const stats = s === 'weapon' ? `⚔ 攻擊 +${t.wAtk}` : `🛡 +${t.aDef}　❤ +${t.aHp}`;
+    const icon = gearIconURL({ tier: tierKey, slot: s, q: 0, plus: 0, cls: myCls }, myCls);
+    const poor = meData.gold < price;
     list.insertAdjacentHTML('beforeend',
-      `<div class="shoprow"><span class="nm">${name}<br><small style="color:#889">${stats}</small></span>
+      `<div class="shoprow"><span class="ic" style="background-image:url(${icon})"></span>
+       <span class="nm">${name}<br><small>${stats}</small></span>
        <span class="pr">${price.toLocaleString()} 💰</span>
-       <button class="sbtn" style="flex:0 0 64px" data-slot="${s}">購買</button></div>`);
+       <span class="qty"><button class="sbtn" data-slot="${s}" ${poor ? 'disabled' : ''}>購買</button></span></div>`);
   });
   list.querySelectorAll('[data-slot]').forEach((b) => b.onclick = () => send({ t: 'buy', what: 'gear', slot: b.dataset.slot }));
+}
+/* 金幣變動時只更新錢包與按鈕狀態，不重建整個清單（避免手機點到一半被重繪） */
+function refreshGearShop() {
+  if (!meData || mapId >= 3) return;
+  const tierKey = ['novice', 'steel', 'mithril'][mapId];
+  const t = GAME.GEAR_TIERS[tierKey];
+  renderWallet('#gearwallet', `<span style="color:#8891a8">本店販售【${t.name}】系列</span>`);
+  $$('#gearlist [data-slot]').forEach((b) => {
+    b.disabled = meData.gold < (b.dataset.slot === 'weapon' ? t.price.weapon : t.price.armor);
+  });
 }
 
 /* ---- 鐵匠鋪 ---- */
@@ -929,6 +1163,14 @@ function renderSmith(force) {
   if (!force && sig === smithSig) return;
   smithSig = sig;
   $('#scrolln').textContent = meData.scrolls;
+  $('#btn-enhance').disabled = meData.scrolls <= 0;
+  const rt = $('#enhrates');
+  if (!rt.dataset.done) {
+    rt.dataset.done = '1';
+    rt.innerHTML = GAME.ENHANCE_RATES.map((r, i) =>
+      `<span class="rate${i < GAME.ENHANCE_SAFE ? ' safe' : ''}">+${i + 1} <b>${+(r * 100).toFixed(1)}%</b></span>`).join('') +
+      `<span class="rate safe" style="flex:1 0 100%;text-align:center">🛡 +${GAME.ENHANCE_SAFE} 以下失敗不降級（藍框），之後失敗降 1 級</span>`;
+  }
   const grid = $('#smithgrid'); grid.innerHTML = '';
   const all = [];
   GAME.SLOTS.forEach((s) => { if (meData.equip[s]) all.push(Object.assign({ _eq: true }, meData.equip[s])); });
@@ -944,7 +1186,8 @@ function renderSmith(force) {
       const rate = it.plus < 10 ? (GAME.ENHANCE_RATES[it.plus] * 100) : 0;
       $('#enh-target').innerHTML = cellHTML(it) +
         `<div><b>${it.name}${it.plus ? ' +' + it.plus : ''}</b><div style="font-size:12px;color:#9aa">
-        ${it.plus >= 10 ? '已達最高強化' : `強化至 +${it.plus + 1} 成功率 <b style="color:var(--gold)">${rate}%</b>${it.plus > 0 ? '，失敗會降至 +' + (it.plus - 1) : ''}`}</div></div>`;
+        ${it.plus >= 10 ? '已達最高強化' : `強化至 +${it.plus + 1} 成功率 <b style="color:var(--gold)">${rate}%</b>` +
+          (it.plus < GAME.ENHANCE_SAFE ? '，<b style="color:#8db8f0">失敗不會降級</b>' : '，失敗會降至 +' + (it.plus - 1))}</div></div>`;
       $('#enhfx').textContent = '';
     };
   });

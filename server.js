@@ -287,6 +287,58 @@ const wss = new WebSocketServer({ server, maxPayload: 16 * 1024 });
 
 const sockets = new Set();
 const players = new Map();
+const accountSockets = new Map();
+const chatHistory = [];             // 全服聊天記錄（最近 60 則）   // 帳號key → Set(連線)，確保一個帳號只有一個角色在線
+
+function authKeyOf(ws) { return ws.auth ? (ws.auth.guest ? 'g:' : 'a:') + ws.auth.key : null; }
+function bindAccount(ws) {
+  const k = authKeyOf(ws);
+  if (!k) return;
+  if (!accountSockets.has(k)) accountSockets.set(k, new Set());
+  accountSockets.get(k).add(ws);
+}
+function unbindAccount(ws) {
+  const k = authKeyOf(ws);
+  if (!k || !accountSockets.has(k)) return;
+  const s = accountSockets.get(k);
+  s.delete(ws);
+  if (!s.size) accountSockets.delete(k);
+}
+/* 同帳號的其他連線一律踢下線（含把角色移出世界） */
+function kickOthers(ws) {
+  const k = authKeyOf(ws);
+  if (!k || !accountSockets.has(k)) return;
+  for (const other of [...accountSockets.get(k)]) {
+    if (other === ws) continue;
+    try {
+      if (other.player) {
+        persist(other);
+        players.delete(other.player.id);
+        broadcastMap(other.player.mapId, { t: 'bye', id: other.player.id });
+        other.player = null;
+      }
+      send(other, { t: 'kicked', msg: '你的帳號已在其他裝置登入，此連線已中斷。' });
+      setTimeout(() => { try { other.close(); } catch (e) {} }, 120);
+    } catch (e) {}
+    accountSockets.get(k).delete(other);
+  }
+}
+/* 立刻把某個角色移出世界（回選角／登出用） */
+function leaveWorld(ws, silent) {
+  if (!ws.player) return;
+  setTimeout(pushRoster, 60);
+  persist(ws);
+  const p = ws.player;
+  players.delete(p.id);
+  broadcastMap(p.mapId, { t: 'bye', id: p.id });
+  // 移除追殺他的士兵
+  for (const w of world) w.guards = w.guards.filter((g) => g.targetId !== p.id);
+  ws.player = null;
+  if (!silent) {
+    const acc = accountOf(ws);
+    send(ws, { t: 'auth', ok: true, chars: (acc ? acc.chars : []).map(charSummary), back: true });
+  }
+}
 
 function send(ws, obj) { if (ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 function broadcastMap(mapId, obj) {
@@ -294,6 +346,11 @@ function broadcastMap(mapId, obj) {
   for (const ws of sockets) if (ws.player && ws.player.mapId === mapId && ws.readyState === 1) ws.send(s);
 }
 function broadcastAll(obj) {
+  if (obj.t === 'announce') {
+    const line = { t: 'chat', sys: 1, msg: obj.msg };
+    chatHistory.push(line);
+    if (chatHistory.length > 60) chatHistory.shift();
+  }
   const s = JSON.stringify(obj);
   for (const ws of sockets) if (ws.player && ws.readyState === 1) ws.send(s);
 }
@@ -777,15 +834,20 @@ function handleAction(ws, m) {
         return;
       }
       if (m.what === 'scroll' && nearBuilding(p, 'shop')) {
-        if (p.gold < G.SCROLL_PRICE) { send(ws, { t: 'msg', msg: '金幣不足！' }); return; }
-        p.gold -= G.SCROLL_PRICE; p.scrolls++;
+        const n = clamp(Math.floor(+m.n || 1), 1, 99);
+        if (p.gold < n * G.SCROLL_PRICE) { send(ws, { t: 'msg', msg: '金幣不足！' }); return; }
+        p.gold -= n * G.SCROLL_PRICE; p.scrolls += n;
+        send(ws, { t: 'msg', msg: `購買強化卷軸 ×${n}` });
       } else if (m.what === 'potion' && nearBuilding(p, 'shop')) {
-        if (p.gold < G.POTION_PRICE) { send(ws, { t: 'msg', msg: '金幣不足！' }); return; }
-        p.gold -= G.POTION_PRICE; p.potions++;
+        const n = clamp(Math.floor(+m.n || 1), 1, 99);
+        if (p.gold < n * G.POTION_PRICE) { send(ws, { t: 'msg', msg: '金幣不足！' }); return; }
+        p.gold -= n * G.POTION_PRICE; p.potions += n;
+        send(ws, { t: 'msg', msg: `購買回血瓶 ×${n}` });
       } else if (m.what === 'arrows' && nearBuilding(p, 'shop')) {
         const n = clamp(Math.floor(+m.n || 0), 1, 10000);
         if (p.gold < n * G.ARROW_PRICE) { send(ws, { t: 'msg', msg: '金幣不足！' }); return; }
         p.gold -= n * G.ARROW_PRICE; p.arrows += n;
+        send(ws, { t: 'msg', msg: `購買箭矢 ×${n}` });
       } else if (m.what === 'gear' && nearBuilding(p, 'gear')) {
         const tierByMap = ['novice', 'steel', 'mithril'][p.mapId];
         if (!tierByMap) return;
@@ -813,8 +875,9 @@ function handleAction(ws, m) {
         it.plus++;
         send(ws, { t: 'enhance', ok: true, name: it.name, plus: it.plus });
       } else {
-        it.plus = Math.max(0, it.plus - 1);
-        send(ws, { t: 'enhance', ok: false, name: it.name, plus: it.plus });
+        const safe = it.plus < G.ENHANCE_SAFE;        // +4 之前失敗不降級
+        if (!safe) it.plus = Math.max(0, it.plus - 1);
+        send(ws, { t: 'enhance', ok: false, safe, name: it.name, plus: it.plus });
       }
       p.hp = Math.min(p.hp, calcStats(p).maxHp);
       break;
@@ -863,9 +926,20 @@ function handleAction(ws, m) {
       if (m.tp) { p.x = +m.tp.x; p.y = +m.tp.y; }
       break;
     }
+    case 'backToSelect': {
+      leaveWorld(ws);
+      return;
+    }
     case 'chat': {
-      const msg = String(m.msg || '').slice(0, 80);
-      if (msg.trim()) broadcastMap(p.mapId, { t: 'chat', name: p.name, msg });
+      const msg = String(m.msg || '').slice(0, 100).replace(/[\u0000-\u001f]/g, '');
+      const t2 = now();
+      if (!msg.trim()) break;
+      if (t2 - (p.chatAt || 0) < 800) break;              // 簡單防洗版
+      p.chatAt = t2;
+      const line = { t: 'chat', name: p.name, cls: p.cls, lvl: p.lvl, msg, zone: G.MAPS[p.mapId].name.split('（')[0] };
+      chatHistory.push(line);
+      if (chatHistory.length > 60) chatHistory.shift();
+      broadcastAll(line);                                  // 全服廣播
       break;
     }
   }
@@ -903,6 +977,7 @@ wss.on('connection', (ws, req) => {
         db.accounts[u] = { salt, pass: hashPass(pw, salt), chars: [] };
         dbDirty = true;
         ws.auth = { key: u, guest: false };
+        bindAccount(ws); kickOthers(ws);
         return send(ws, { t: 'auth', ok: true, chars: [] });
       }
       if (m.t === 'login') {
@@ -910,12 +985,14 @@ wss.on('connection', (ws, req) => {
         const acc = db.accounts[u];
         if (!acc || acc.pass !== hashPass(pw, acc.salt)) return send(ws, { t: 'auth', ok: false, msg: '帳號或密碼錯誤' });
         ws.auth = { key: u, guest: false };
+        bindAccount(ws); kickOthers(ws);
         return send(ws, { t: 'auth', ok: true, chars: acc.chars.map(charSummary) });
       }
       if (m.t === 'guest') {
         const key = 'ip_' + crypto.createHash('sha1').update(ip).digest('hex').slice(0, 16);
         if (!db.guests[key]) { db.guests[key] = { chars: [] }; dbDirty = true; }
         ws.auth = { key, guest: true };
+        bindAccount(ws); kickOthers(ws);
         return send(ws, { t: 'auth', ok: true, guest: true, chars: db.guests[key].chars.map(charSummary) });
       }
       return;
@@ -927,8 +1004,9 @@ wss.on('connection', (ws, req) => {
         const cls = m.cls;
         if (!G.CLASSES[cls]) return;
         if (!/^[\w一-龥]{1,10}$/.test(name)) return send(ws, { t: 'charErr', msg: '角色 ID 需 1~10 字' });
-        if (acc.chars.length >= 3) return send(ws, { t: 'charErr', msg: '每個帳號最多 3 個角色' });
+        if (acc.chars.length >= 3) return send(ws, { t: 'charErr', msg: '每個帳號最多只能建立 3 個角色' });
         if (acc.chars.some((c) => c.name === name)) return send(ws, { t: 'charErr', msg: '已有同名角色' });
+        kickOthers(ws);
         const p = newChar(cls, name);
         acc.chars.push(serializeChar(p)); dbDirty = true;
         enterWorld(ws, p);
@@ -937,7 +1015,16 @@ wss.on('connection', (ws, req) => {
       if (m.t === 'pickChar') {
         const c = acc.chars[m.i];
         if (!c) return;
-        if (players.has(c.id)) return send(ws, { t: 'charErr', msg: '此角色已在線上' });
+        kickOthers(ws);                       // 同帳號其他角色一律下線
+        const old = players.get(c.id);        // 該角色若還殘留在世界上，先移除
+        if (old && old.ws && old.ws !== ws) {
+          persist(old.ws);
+          players.delete(c.id);
+          broadcastMap(old.mapId, { t: 'bye', id: c.id });
+          old.ws.player = null;
+          send(old.ws, { t: 'kicked', msg: '此角色已在其他裝置登入。' });
+          setTimeout(() => { try { old.ws.close(); } catch (e) {} }, 120);
+        } else if (old) players.delete(c.id);
         enterWorld(ws, loadChar(c));
         return;
       }
@@ -948,19 +1035,42 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     sockets.delete(ws);
+    unbindAccount(ws);
     if (ws.player) {
       persist(ws);
-      players.delete(ws.player.id);
-      broadcastMap(ws.player.mapId, { t: 'bye', id: ws.player.id });
+      const p = ws.player;
+      players.delete(p.id);
+      broadcastMap(p.mapId, { t: 'bye', id: p.id });
+      for (const w of world) w.guards = w.guards.filter((g) => g.targetId !== p.id);
+      ws.player = null;
+      setTimeout(pushRoster, 60);
     }
   });
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 });
 
 function charSummary(c) { return { name: c.name, cls: c.cls, lvl: c.lvl }; }
+
+/* 全服線上玩家名單 */
+function rosterPayload() {
+  const list = [];
+  for (const ws of sockets) {
+    const p = ws.player;
+    if (!p) continue;
+    list.push({ id: p.id, name: p.name, cls: p.cls, lvl: p.lvl, map: p.mapId, dead: !!p.dead });
+  }
+  list.sort((a, b) => b.lvl - a.lvl || a.name.localeCompare(b.name));
+  return { t: 'roster', list };
+}
+function pushRoster() { broadcastAll(rosterPayload()); }
 function enterWorld(ws, p) {
   p.ws = ws; ws.player = p;
   players.set(p.id, p);
   send(ws, { t: 'enter', you: p.id, mapId: p.mapId, name: p.name, cls: p.cls });
+  if (chatHistory.length) send(ws, { t: 'chatHistory', lines: chatHistory.slice(-25) });
+  broadcastAll({ t: 'chat', sys: 1, msg: `【${p.name}】上線了` });
+  setTimeout(pushRoster, 50);
 }
 
 /* ---------------- 私有狀態 ---------------- */
@@ -1189,6 +1299,16 @@ setInterval(() => {
 }, 100);
 
 setInterval(() => { for (const ws of sockets) if (ws.player) persist(ws); }, 30000);
+setInterval(() => { if (players.size) pushRoster(); }, 3000);   // 線上名單即時更新
+
+// 心跳偵測：20 秒沒回應就視為斷線，避免角色卡在原地
+setInterval(() => {
+  for (const ws of [...sockets]) {
+    if (ws.isAlive === false) { try { ws.terminate(); } catch (e) {} continue; }
+    ws.isAlive = false;
+    try { ws.ping(); } catch (e) {}
+  }
+}, 20000);
 
 initStore()
   .then(() => server.listen(PORT, () => console.log(`龍領主 Online 伺服器已啟動： http://localhost:${PORT}`)))

@@ -82,6 +82,8 @@ input:focus{border-color:var(--gold)}
 .abtn .key{position:absolute;top:2px;right:5px;font-size:9px;color:#778}
 .abtn .cd{position:absolute;inset:0;background:#000000aa;border-radius:10px;display:flex;align-items:center;
   justify-content:center;font-size:15px;color:#fff}
+.abtn .dot{position:absolute;top:4px;left:5px;width:8px;height:8px;border-radius:50%;background:#ff5a4a;
+  box-shadow:0 0 6px #ff5a4a}
 /* 手遊式戰鬥按鍵（右下） */
 #combat{position:absolute;right:20px;bottom:18px;display:flex;flex-direction:column;align-items:flex-end;gap:10px;pointer-events:auto}
 #combat .row{display:flex;align-items:flex-end;gap:12px}
@@ -96,8 +98,9 @@ input:focus{border-color:var(--gold)}
   font-size:17px;font-weight:700;color:#fff;text-shadow:0 1px 3px #000;pointer-events:none}
 #atkbtn{width:84px;height:84px;background:radial-gradient(circle at 34% 30%,#2a3050,#151826);border-color:#5a6288}
 #atkbtn svg{width:44px;height:44px}
-#autobtn{padding:4px 14px;border-radius:14px;background:#151826dd;border:1px solid var(--line);color:#9aa0b8;
+#autobtn,#pkbtn{padding:4px 14px;border-radius:14px;background:#151826dd;border:1px solid var(--line);color:#9aa0b8;
   cursor:pointer;font-size:12px}
+#pkbtn.on{background:linear-gradient(180deg,#ef8a7a,#c9453a);color:#fff;border-color:#ef8a7a;font-weight:700}
 #autobtn.on{background:linear-gradient(180deg,#e8c874,#c9a24d);color:#241d09;border-color:var(--gold);font-weight:700}
 
 /* ---------- 手機浮動虛擬搖桿（跟著手指位置出現） ---------- */
@@ -124,6 +127,9 @@ input:focus{border-color:var(--gold)}
 /* ---------- 小螢幕自適應 ---------- */
 @media (max-width:820px), (pointer:coarse){
   #chatbox{display:none}
+  #chatpanel{width:96vw}
+  #chatfeed{height:44vh}
+  #players{width:96vw}
   #minimap{width:100px;height:74px}
   #topbar{top:8px;left:8px}
   #topbar .bar{width:126px;height:14px}
@@ -142,16 +148,10 @@ input:focus{border-color:var(--gold)}
   #atkbtn{width:78px;height:78px}
   #atkbtn svg{width:38px;height:38px}
   #helpbtn{top:100px;right:10px;width:30px;height:30px;font-size:14px}
+  #charbtn{top:136px;right:10px;width:30px;height:30px;font-size:14px}
   #hint{bottom:210px;font-size:12px;padding:5px 12px}
   #msgs{bottom:auto;top:150px;left:8px;max-width:200px}
   .m{font-size:11px}
-  #bag{width:96vw}
-  .bagwrap{flex-direction:column}
-  #dollbox{width:100%}
-  #dollcv{height:150px}
-  .invgrid{grid-template-columns:repeat(auto-fill,42px);justify-content:center}
-  .panel{max-height:88vh;overflow-y:auto;width:min(94vw,560px)}
-  #smithgrid{grid-template-columns:repeat(auto-fill,42px)!important}
   .card{padding:20px}
 }
 /* 手機橫式（矮螢幕）：避免右側按鈕與小地圖重疊 */
@@ -171,6 +171,7 @@ input:focus{border-color:var(--gold)}
   #autobtn{padding:2px 11px;font-size:11px}
   #minimap{width:88px;height:64px;top:8px;right:8px}
   #helpbtn{top:8px;right:104px;width:28px;height:28px;font-size:13px}
+  #charbtn{top:8px;right:138px;width:28px;height:28px;font-size:13px}
   #hint{bottom:150px}
   #msgs{top:82px;max-width:170px}
   #zone{bottom:6px;font-size:10px}
@@ -183,13 +184,46 @@ input:focus{border-color:var(--gold)}
 .c b{color:#8db8f0}
 #chatin{width:100%;padding:6px 10px;font-size:13px;background:#000000aa;border:1px solid var(--line);
   border-radius:6px;color:#fff;outline:none;display:none}
+/* 線上玩家列表 */
+#players{width:min(460px,94vw)}
+#players .pbody{max-height:min(58vh,440px)}
+#plist{display:flex;flex-direction:column;gap:4px}
+.zonehd{display:flex;align-items:center;gap:8px;margin:8px 0 2px;color:var(--gold);font-size:13px;font-weight:700}
+.zonehd:first-child{margin-top:0}
+.zonehd .cnt{color:#8b90a8;font-weight:400;font-size:12px}
+.zonehd .bar2{flex:1;height:1px;background:var(--line)}
+.prow{display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:8px;padding:6px 11px;font-size:13.5px}
+.prow.self{border-color:var(--gold);background:#2a2617}
+.prow .cdot{width:9px;height:9px;border-radius:50%;flex:0 0 9px}
+.prow .lv{color:#9aa0b8;font-size:12px;font-variant-numeric:tabular-nums;min-width:46px}
+.prow .pn{flex:1;font-weight:700}
+.prow .cl{color:#8b90a8;font-size:12px}
+.prow .st{font-size:11px;color:#ff8a80}
+/* 全服聊天面板 */
+#chatpanel{width:min(560px,94vw)}
+#chatfeed{height:min(46vh,300px);overflow-y:auto;background:#12141d;border:1px solid var(--line);
+  border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:5px;font-size:13.5px;line-height:1.6}
+#chatfeed .ln{word-break:break-word}
+#chatfeed .nm{color:#8db8f0;font-weight:700}
+#chatfeed .zn{color:#6b7292;font-size:11px}
+#chatfeed .sys{color:#e8c874}
+#chatfeed .me .nm{color:#ffd76e}
+.chatrow{display:flex;gap:8px;margin-top:10px}
+.chatrow input{margin:0}
 
 /* ---------- 面板（背包/商店/鐵匠） ---------- */
 .panel{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--panel);
-  border:1px solid var(--line);border-radius:14px;padding:18px;z-index:40;box-shadow:0 24px 80px #000c;pointer-events:auto}
-.panel h3{color:var(--gold);font-size:17px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center}
-.panel h3 .x{cursor:pointer;color:#778;font-size:20px;padding:0 6px}
-.panel h3 .x:hover{color:#fff}
+  border:1px solid var(--line);border-radius:14px;padding:0;z-index:40;box-shadow:0 24px 80px #000c;pointer-events:auto;
+  display:flex;flex-direction:column;max-height:88vh;overflow:hidden}
+.panel h3{color:var(--gold);font-size:17px;margin:0;flex:0 0 auto;padding:13px 18px;
+  border-bottom:1px solid #ffffff14;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.panel h3 .x{cursor:pointer;color:#889;font-size:22px;line-height:1;padding:4px 8px;margin:-4px -8px -4px 0;border-radius:8px}
+.panel h3 .x:hover{color:#fff;background:#ffffff12}
+.pbody{padding:14px 18px;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;flex:1 1 auto}
+.pfoot{flex:0 0 auto;padding:10px 18px;border-top:1px solid #ffffff14;background:#00000030}
+#scrim{position:fixed;inset:0;background:#00000088;z-index:39;pointer-events:auto}
+.pfoot .rowbtns{margin-top:0}
 #bag{width:660px;max-width:96vw}
 .bagwrap{display:flex;gap:16px}
 #dollbox{width:250px;background:var(--panel2);border-radius:10px;padding:10px;position:relative;text-align:center}
@@ -230,18 +264,68 @@ input:focus{border-color:var(--gold)}
 .sbtn:hover{border-color:var(--gold);color:var(--gold)}
 .sbtn:disabled{opacity:.35;cursor:default}
 .shoprow{display:flex;align-items:center;gap:10px;background:var(--panel2);border:1px solid var(--line);
-  border-radius:8px;padding:9px 12px;margin-bottom:7px}
-.shoprow .nm{flex:1;font-size:14px}
-.shoprow .pr{color:var(--gold);font-size:13px}
+  border-radius:10px;padding:9px 12px;margin-bottom:8px}
+.shoprow .ic{width:44px;height:44px;flex:0 0 44px;border-radius:8px;background:#12141d;border:1px solid var(--line);
+  background-size:40px 40px;background-position:center;background-repeat:no-repeat;
+  display:flex;align-items:center;justify-content:center;font-size:23px}
+.shoprow .nm{flex:1;min-width:0;font-size:14px;line-height:1.45}
+.shoprow .nm small{color:#889;font-size:11.5px}
+.shoprow .pr{color:var(--gold);font-size:13px;white-space:nowrap;font-weight:700}
+.shoprow .qty{display:flex;gap:6px;flex:0 0 auto}
+.shoprow .sbtn{flex:0 0 66px}
+/* 錢包列（商店頂端固定顯示持有資源） */
+.walletbar{display:flex;flex-wrap:wrap;gap:6px 8px;background:#12141d;border:1px solid var(--line);
+  border-radius:10px;padding:8px 11px;margin-bottom:10px;font-size:13px;color:#c9cee6}
+.walletbar b{color:var(--gold)}
+.walletbar span{white-space:nowrap}
+.shophint{font-size:11.5px;color:#8891a8;margin-bottom:9px;line-height:1.6}
+/* 強化成功率標籤 */
+.rates{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:9px}
+.rate{background:#12141d;border:1px solid var(--line);border-radius:6px;padding:2px 7px;font-size:11px;color:#9aa0b8}
+.rate b{color:var(--gold);font-weight:700}
+.rate.safe{border-color:#3f6fa0;background:#131a26}
 .gold-ico{color:var(--gold)}
-#smith .target{display:flex;align-items:center;gap:12px;background:var(--panel2);border-radius:8px;padding:10px;margin-bottom:10px;min-height:64px}
-#enhfx{text-align:center;font-size:20px;min-height:30px;margin:6px 0;font-weight:700}
+#smith .target{display:flex;align-items:center;gap:12px;background:var(--panel2);border-radius:10px;padding:10px;margin-bottom:10px;min-height:64px}
+#smithgrid{grid-template-columns:repeat(auto-fill,44px);justify-content:start}
+#enhfx{text-align:center;font-size:20px;min-height:0;margin:0;font-weight:700}
+#enhfx:not(:empty){min-height:28px;margin:6px 0}
 #deathview{background:#000000d8}
 #deathview .card{text-align:center}
 kbd{background:#2a2e42;border:1px solid var(--line);border-radius:4px;padding:1px 6px;font-size:11px}
 #helpbtn{position:absolute;bottom:14px;right:14px;pointer-events:auto;width:36px;height:36px;border-radius:50%;
   background:#151826dd;border:1px solid var(--line);color:#aab;cursor:pointer;font-size:16px}
+#charbtn{position:absolute;top:174px;right:14px;pointer-events:auto;width:36px;height:36px;border-radius:50%;
+  background:#151826dd;border:1px solid var(--line);color:#aab;cursor:pointer;font-size:16px}
+#charbtn:hover{border-color:var(--gold);color:var(--gold)}
 #help{width:420px;font-size:13px;line-height:2}
+/* ---------- 直式手機：面板改成底部抽屜、商品列改兩行卡片 ----------
+   （必須放在基礎樣式之後，否則同權重會被後面的規則蓋掉） */
+@media (max-width:820px), (pointer:coarse){
+  .bagwrap{flex-direction:column}
+  #dollbox{width:100%}
+  #dollcv{height:150px}
+  .invgrid{grid-template-columns:repeat(auto-fill,46px);justify-content:center}
+  .cell{width:46px;height:46px;background-size:42px 42px}
+  /* 面板改成「底部抽屜」：全寬、頂端圓角、標題與底部按鈕固定不捲動 */
+  .panel{top:auto!important;bottom:0!important;left:0!important;right:0!important;
+    transform:none!important;width:auto!important;max-width:none!important;
+    border-radius:20px 20px 0 0;border-bottom:none;max-height:min(86vh,720px);
+    padding-bottom:env(safe-area-inset-bottom,0px)}
+  .panel::before{content:'';position:absolute;top:7px;left:50%;transform:translateX(-50%);
+    width:42px;height:4px;border-radius:3px;background:#ffffff2e}
+  .panel h3{font-size:16px;padding:16px 14px 11px}
+  .panel h3 .x{font-size:26px;padding:6px 12px;margin:-6px -8px -6px 0}
+  .pbody{padding:12px 14px}
+  .pfoot{padding:10px 14px}
+  #smithgrid{grid-template-columns:repeat(auto-fill,46px)!important;justify-content:center}
+  /* 商品列改成兩行卡片：上排 圖示＋名稱＋價格，下排 全寬購買鍵（好按） */
+  .shoprow{flex-wrap:wrap;gap:8px 10px;padding:10px 12px}
+  .shoprow .pr{font-size:15px;text-align:right}
+  .shoprow .nm{flex:1 1 40%;min-width:0}
+  .shoprow .qty{flex:1 0 100%;gap:8px}
+  .shoprow .sbtn{flex:1 1 0;padding:12px 10px;font-size:15px;min-height:46px;min-width:84px}
+  .rate{font-size:11.5px;padding:3px 8px}
+}
 </style>
 </head>
 <body>
@@ -270,8 +354,8 @@ kbd{background:#2a2e42;border:1px solid var(--line);border-radius:4px;padding:1p
   <div class="card" style="width:min(560px,94vw)">
     <h1 class="logo" style="font-size:24px">選擇角色</h1>
     <div id="charlist"></div>
-    <div class="sub" style="margin:10px 0 4px">— 建立新角色 —</div>
-    <div class="classes">
+    <div class="sub" style="margin:10px 0 4px" id="charcount">— 建立新角色 —</div>
+    <div class="classes" id="clsrow">
       <div class="cls" data-cls="warrior"><img src="sprites/warrior.png"><div class="nm">戰士</div><div class="ds">高血量高防禦<br>近戰橫掃</div></div>
       <div class="cls" data-cls="archer"><img src="sprites/archer.png"><div class="nm">射手</div><div class="ds">遠程狙擊<br>攻擊消耗箭矢</div></div>
       <div class="cls" data-cls="assassin"><img src="sprites/assassin.png"><div class="nm">刺客</div><div class="ds">高速高爆擊<br>移動最快</div></div>
@@ -298,6 +382,8 @@ kbd{background:#2a2e42;border:1px solid var(--line);border-radius:4px;padding:1p
     <div class="abtn" id="ab-potion"><span class="key">R</span><b>🧪</b><span id="potn">×0</span><div class="cd hidden" id="potcd"></div></div>
     <div class="abtn" id="ab-bag"><span class="key">B</span><b>🎒</b><span>背包</span></div>
     <div class="abtn" id="ab-pick"><span class="key">F</span><b>✋</b><span>撿取</span></div>
+    <div class="abtn" id="ab-chat"><span class="key">↵</span><b>💬</b><span>聊天</span><span class="dot hidden" id="chatdot"></span></div>
+    <div class="abtn" id="ab-players"><span class="key">P</span><b>👥</b><span id="onlinen">0 人</span></div>
   </div>
   <div id="dpad">
     <div class="dk up" data-dir="up"><svg viewBox="0 0 24 24" fill="none"><path d="M6 15l6-6 6 6" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
@@ -307,7 +393,7 @@ kbd{background:#2a2e42;border:1px solid var(--line);border-radius:4px;padding:1p
     <div class="dk dn" data-dir="down"><svg viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
   </div>
   <div id="combat">
-    <button id="autobtn">自動</button>
+    <div style="display:flex;gap:6px"><button id="pkbtn" title="自動攻擊是否包含玩家">PK</button><button id="autobtn">自動</button></div>
     <div class="row">
       <div class="skbtn" id="sk0"><span class="key">Q</span><span class="ic"></span><span class="nm"></span><div class="cdov"></div><div class="cdtx"></div></div>
       <div class="skbtn" id="sk1"><span class="key">E</span><span class="ic"></span><span class="nm"></span><div class="cdov"></div><div class="cdtx"></div></div>
@@ -321,59 +407,113 @@ kbd{background:#2a2e42;border:1px solid var(--line);border-radius:4px;padding:1p
     <input type="text" id="chatin" placeholder="按 Enter 送出" maxlength="80">
   </div>
   <button id="helpbtn" style="bottom:auto;top:130px;right:14px">?</button>
+  <button id="charbtn" title="回到選擇角色">👤</button>
 </div>
+
+<!-- 面板遮罩（點空白處關閉） -->
+<div id="scrim" class="hidden"></div>
 
 <!-- 背包 -->
 <div class="panel hidden" id="bag">
   <h3>🎒 背包與裝備 <span class="x" data-close="bag">✕</span></h3>
-  <div class="bagwrap">
-    <div id="dollbox">
-      <canvas id="dollcv" width="230" height="230"></canvas>
-      <div class="slotgrid" id="equipslots"></div>
-    </div>
-    <div style="flex:1">
-      <div style="font-size:12px;color:#9aa0b8;margin-bottom:6px" id="baginfo"></div>
-      <div class="invgrid" id="invgrid"></div>
-      <div class="rowbtns">
-        <button class="sbtn" id="btn-equip">裝備</button>
-        <button class="sbtn" id="btn-drop">丟棄</button>
+  <div class="pbody">
+    <div class="bagwrap">
+      <div id="dollbox">
+        <canvas id="dollcv" width="230" height="230"></canvas>
+        <div class="slotgrid" id="equipslots"></div>
       </div>
+      <div style="flex:1">
+        <div style="font-size:12px;color:#9aa0b8;margin-bottom:6px" id="baginfo"></div>
+        <div class="invgrid" id="invgrid"></div>
+      </div>
+    </div>
+  </div>
+  <div class="pfoot">
+    <div class="rowbtns">
+      <button class="sbtn" id="btn-equip">裝備</button>
+      <button class="sbtn" id="btn-drop">丟棄</button>
     </div>
   </div>
 </div>
 
 <!-- 商店 -->
-<div class="panel hidden" id="shop" style="width:400px">
+<div class="panel hidden" id="shop" style="width:430px">
   <h3>🏪 雜貨商店 <span class="x" data-close="shop">✕</span></h3>
-  <div class="shoprow"><span class="nm">🧪 快速回血瓶<br><small style="color:#889">立即回復 1/5 血量（冷卻 30 秒）</small></span>
-    <span class="pr">1,000 💰</span><button class="sbtn" style="flex:0 0 64px" data-buy="potion">購買</button></div>
-  <div class="shoprow"><span class="nm">📜 強化卷軸<br><small style="color:#889">鐵匠鋪強化裝備必需</small></span>
-    <span class="pr">30,000 💰</span><button class="sbtn" style="flex:0 0 64px" data-buy="scroll">購買</button></div>
-  <div class="shoprow"><span class="nm">🏹 箭矢 ×100<br><small style="color:#889">射手攻擊必需品</small></span>
-    <span class="pr">100 💰</span><button class="sbtn" style="flex:0 0 64px" data-buy="arrows" data-n="100">購買</button></div>
-  <div class="shoprow"><span class="nm">🏹 箭矢 ×1000</span>
-    <span class="pr">1,000 💰</span><button class="sbtn" style="flex:0 0 64px" data-buy="arrows" data-n="1000">購買</button></div>
+  <div class="pbody">
+    <div class="walletbar" id="shopwallet"></div>
+    <div class="shoprow">
+      <span class="ic">🧪</span>
+      <span class="nm">快速回血瓶<br><small>立即回復 1/5 血量（冷卻 30 秒）</small></span>
+      <span class="pr">1,000 💰</span>
+      <span class="qty multi">
+        <button class="sbtn" data-buy="potion" data-n="1">購買 ×1</button>
+        <button class="sbtn" data-buy="potion" data-n="10">×10</button>
+      </span>
+    </div>
+    <div class="shoprow">
+      <span class="ic">📜</span>
+      <span class="nm">強化卷軸<br><small>鐵匠鋪強化裝備必需</small></span>
+      <span class="pr">30,000 💰</span>
+      <span class="qty multi">
+        <button class="sbtn" data-buy="scroll" data-n="1">購買 ×1</button>
+        <button class="sbtn" data-buy="scroll" data-n="10">×10</button>
+      </span>
+    </div>
+    <div class="shoprow arrowonly">
+      <span class="ic">🏹</span>
+      <span class="nm">箭矢<br><small>射手攻擊必需品（1 金幣／支）</small></span>
+      <span class="pr">100 / 1,000 💰</span>
+      <span class="qty multi">
+        <button class="sbtn" data-buy="arrows" data-n="100">買 ×100</button>
+        <button class="sbtn" data-buy="arrows" data-n="1000">買 ×1000</button>
+      </span>
+    </div>
+  </div>
 </div>
 
 <!-- 裝備店 -->
-<div class="panel hidden" id="gearshop" style="width:420px">
+<div class="panel hidden" id="gearshop" style="width:440px">
   <h3>⚔ 裝備店 <span class="x" data-close="gearshop">✕</span></h3>
-  <div id="gearlist"></div>
+  <div class="pbody">
+    <div class="walletbar" id="gearwallet"></div>
+    <div id="gearlist"></div>
+  </div>
 </div>
 
 <!-- 鐵匠鋪 -->
 <div class="panel hidden" id="smith" style="width:560px">
   <h3>🔨 鐵匠鋪 — 裝備強化 <span class="x" data-close="smith">✕</span></h3>
-  <div class="target" id="enh-target"><span style="color:#667">← 從下方選擇要強化的裝備</span></div>
-  <div id="enhfx"></div>
-  <div style="font-size:12px;color:#9aa0b8;margin-bottom:6px">
-    成功率：+1 100%｜+2 80%｜+3 60%｜+4 40%｜+5 20%｜+6 10%｜+7 5%｜+8 3%｜+9 1%｜+10 0.5%（失敗降 1 級）
+  <div class="pbody">
+    <div class="target" id="enh-target"><span style="color:#667">👇 從下方選擇要強化的裝備</span></div>
+    <div id="enhfx"></div>
+    <div class="rates" id="enhrates"></div>
+    <div class="invgrid" id="smithgrid"></div>
   </div>
-  <div class="invgrid" id="smithgrid" style="grid-template-columns:repeat(10,44px)"></div>
-  <div class="rowbtns">
-    <div style="flex:1;padding:9px;font-size:13px;color:#9aa0b8">持有卷軸：<b id="scrolln" style="color:var(--gold)">0</b></div>
-    <button class="sbtn" id="btn-enhance" style="flex:0 0 160px">🔨 強化（消耗 1 卷軸）</button>
+  <div class="pfoot">
+    <div class="rowbtns" style="align-items:center">
+      <div style="flex:0 0 auto;font-size:13px;color:#9aa0b8;white-space:nowrap">📜 <b id="scrolln" style="color:var(--gold)">0</b></div>
+      <button class="sbtn" id="btn-enhance" style="flex:1;min-height:44px">🔨 強化（消耗 1 卷軸）</button>
+    </div>
   </div>
+</div>
+
+<!-- 全服聊天 -->
+<div class="panel hidden" id="chatpanel">
+  <h3>💬 全服頻道 <span class="x" data-close="chatpanel">✕</span></h3>
+  <div class="pbody" style="padding-bottom:8px"><div id="chatfeed"></div></div>
+  <div class="pfoot">
+    <div class="chatrow">
+      <input type="text" id="chatinput" placeholder="輸入訊息後按 Enter 或送出…" maxlength="100">
+      <button class="sbtn" id="chatsend" style="flex:0 0 74px">送出</button>
+    </div>
+  </div>
+</div>
+
+<!-- 線上玩家 -->
+<div class="panel hidden" id="players">
+  <h3><span>👥 線上玩家 <span id="ptotal" style="font-size:13px;color:#9aa0b8;font-weight:400"></span></span>
+    <span class="x" data-close="players">✕</span></h3>
+  <div class="pbody"><div id="plist"></div></div>
 </div>
 
 <!-- 死亡畫面 -->
@@ -388,15 +528,15 @@ kbd{background:#2a2e42;border:1px solid var(--line);border-radius:4px;padding:1p
 <!-- 說明 -->
 <div class="panel hidden" id="help">
   <h3>📖 操作說明 <span class="x" data-close="help">✕</span></h3>
-  <div>
+  <div class="pbody">
     <kbd>W A S D</kbd>／方向鍵 移動　<kbd>滑鼠左鍵</kbd>／<kbd>空白鍵</kbd> 普通攻擊<br>
     <kbd>Q</kbd><kbd>E</kbd> 職業技能　<kbd>R</kbd> 喝回血瓶　<kbd>B</kbd> 背包／裝備<br>
     <kbd>F</kbd> 撿取／互動（商店・鐵匠鋪・旅店・寶箱・傳送門）　<kbd>Enter</kbd> 聊天<br>
-    右下角「自動」＝自動攻擊附近的怪（不放技能）<br><br>
+    右下角「自動」＝自動攻擊（會自動繞路找怪）；旁邊「PK」開啟後連玩家也會自動攻擊<br>右上 👤 ＝回到選擇角色　💬 ＝全服聊天　👥（或按 <kbd>P</kbd>）＝線上玩家列表<br><br>
     ⚑ BOSS 出現在各城鎮標註的大空間；打贏【岩石魔像】開啟黑暗聖殿；打贏【黑暗信徒】且 150 級開啟火山王座。<br>
     ⚑ 火山王座的寶箱有機率開出火山鑰匙，集齊 3 把可開啟中央的古代火山傳送門，前往中崙學園討伐龍領主（707 班）！<br>
     ⚑ BOSS 裝備會掉在地上，靠近按 <kbd>F</kbd> 撿取；金、紅、彩品質只有 BOSS 會掉！<br>
-    ⚑ 城鎮內殺人會被 10 名士兵追殺 10 分鐘，小心！
+    ⚑ 城鎮內殺人會被 10 名士兵追殺 10 分鐘，小心！<br>⚑ 鐵匠鋪強化：<b>+4 以下失敗不會降級</b>，+5 起失敗才會掉一級。
   </div>
 </div>
 

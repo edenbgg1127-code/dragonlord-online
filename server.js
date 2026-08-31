@@ -882,6 +882,11 @@ function handleAction(ws, m) {
   const w = world[p.mapId];
   const md = G.MAPS[p.mapId];
   switch (m.t) {
+    case 'view': {          // 前端回報螢幕看得到多大範圍，伺服器只送這個範圍內的東西
+      p.vw = clamp(Math.round(+m.w || 0), 600, 5000);
+      p.vh = clamp(Math.round(+m.h || 0), 400, 5000);
+      break;
+    }
     case 'move': {
       p.input = { dx: clamp(+m.dx || 0, -1, 1), dy: clamp(+m.dy || 0, -1, 1) };
       break;
@@ -1228,6 +1233,7 @@ function handleAction(ws, m) {
       if (!p.dead) return;
       p.dead = false; p.poison = null;
       const rp = respawnPoint(p.mapId);
+      if (rp.mapId !== p.mapId) { ws._mseen = null; ws._pseen = null; ws._chestSig = null; }
       p.mapId = rp.mapId;
       p.x = rp.x + rnd(-50, 50); p.y = rp.y + rnd(-40, 40);
       p.hp = calcStats(p).maxHp;
@@ -1280,6 +1286,7 @@ function handleAction(ws, m) {
 
 function movePlayerToMap(p, mapId, how) {
   const tr = tradeOf(p); if (tr) endTrade(tr, '有人離開了交易所，交易取消。');
+  if (p.ws) { p.ws._mseen = null; p.ws._pseen = null; p.ws._chestSig = null; p.ws._lastMe = null; }   // 換圖要重送靜態資料
   p.mapId = mapId;
   const md = G.MAPS[mapId];
   let at;
@@ -1399,6 +1406,7 @@ function rosterPayload() {
 function pushRoster() { broadcastAll(rosterPayload()); }
 function enterWorld(ws, p) {
   p.ws = ws; ws.player = p;
+  ws._mseen = null; ws._pseen = null; ws._chestSig = null; ws._invSig = null; ws._lastMe = null;
   players.set(p.id, p);
   send(ws, { t: 'enter', you: p.id, mapId: p.mapId, name: p.name, cls: p.cls });
   if (chatHistory.length) send(ws, { t: 'chatHistory', lines: chatHistory.slice(-25) });
@@ -1534,21 +1542,32 @@ function botTick(b, t) {
 }
 
 /* ---------------- 私有狀態 ---------------- */
-function privateState(p) {
+/* 背包／裝備很肥（最多 120 格），只在真的有變動時才送，其餘 tick 省下來 */
+function invSig(p) {
+  let s = (p.bagExtra || 0) + ':';
+  for (const k of G.SLOTS) { const it = p.equip[k]; s += it ? it.uid + it.plus + it.q : '-'; }
+  s += '|' + p.inv.length;
+  for (const it of p.inv) s += it.uid + (it.plus || 0);
+  return s;
+}
+function privateState(p, ws) {
   const st = calcStats(p);
   const t = now();
   const skills = G.skillsOf(p.cls, p.reborn);
-  return {
+  const sig = invSig(p);
+  const sendInv = !ws || ws._invSig !== sig;
+  if (ws) ws._invSig = sig;
+  return Object.assign(sendInv ? { inv: p.inv, equip: p.equip } : {}, {
     t: 'me', lvl: p.lvl, xp: p.xp, xpNeed: G.xpNeed(p.lvl), gold: p.gold,
     hp: Math.ceil(p.hp), maxHp: st.maxHp, atk: st.atk, def: st.def,
     arrows: p.arrows, potions: p.potions, scrolls: p.scrolls, keys: p.keys,
     potionCd: Math.max(0, G.POTION_CD - (t - p.potionAt)),
     skillCd: skills.map((sk, i) => Math.max(0, sk.cd - (t - (p.skillAt[i] || 0)))),
-    inv: p.inv, equip: p.equip, flags: p.flags, dead: p.dead,
+    flags: p.flags, dead: p.dead,
     reborn: p.reborn || 0, bagCap: invCap(p), bagPrice: G.bagNextPrice(p.bagExtra || 0),
     innLock: Math.max(0, G.INN_PVP_LOCK - (t - (p.pvpAt || 0))),
     stealth: Math.max(0, (p.stealthUntil || 0) - t), ambush: !!p.ambush
-  };
+  });
 }
 
 /* 移動速度倍率：緩速箭會變慢、刺客隱身時變快 */
@@ -1559,6 +1578,19 @@ function moveMul(p, t) {
   return m;
 }
 function isHidden(p, t) { return !!(p.stealthUntil && t < p.stealthUntil); }
+
+/* me 訊息每 0.1 秒一次，但裡面 20 幾個欄位大多不會變 → 只送有變動的部分 */
+function meDelta(p, ws) {
+  const full = privateState(p, ws);
+  const prev = ws._lastMe || (ws._lastMe = {});
+  const out = { t: 'me' };
+  for (const k in full) {
+    if (k === 't') continue;
+    const v = JSON.stringify(full[k]);
+    if (prev[k] !== v) { out[k] = full[k]; prev[k] = v; }
+  }
+  return out;
+}
 
 /* ---------------- 模擬迴圈 ---------------- */
 const TICK = 100;
@@ -1738,53 +1770,110 @@ setInterval(() => {
   });
 }, TICK);
 
-/* ---------------- 廣播迴圈 ---------------- */
+/* ---------------- 廣播迴圈 ----------------
+   省流量三招（Render 免費方案的 5GB 很快就會被吃光）：
+   1. 視野裁切：只送玩家螢幕看得到的怪物／掉落物／投射物，不送整張地圖
+   2. 寶箱只在有變動時送（不是每 0.1 秒送一次）
+   3. 背包與裝備只在有變動時送（原本每 0.1 秒把整個背包送一次）        */
+const VIEW_MARGIN = 320;                 // 視野外多送一點，讓怪物是「走進畫面」而不是「跳出來」
+const DEF_VW = 2600, DEF_VH = 1500;      // 舊版前端沒回報視野時的預設值
+let bcTick = 0;
 setInterval(() => {
   const t = now();
+  const mmTick = (bcTick++ % 20) === 0;      // 每 20 次（2 秒）更新一次小地圖光點
   world.forEach((w, mapId) => {
+    // 這張圖上沒有真人玩家就完全不用算（假人不需要收封包）
+    const viewers = [];
+    for (const ws of sockets) if (ws.player && ws.player.mapId === mapId && ws.readyState === 1) viewers.push(ws);
+    if (!viewers.length) return;
+
     const ps = [];
     for (const p of allPlayers()) {
       if (p.mapId !== mapId) continue;
       const hid = isHidden(p, t);
       const vis = {};
-      for (const s of G.SLOTS) {
-        const it = p.equip[s];
-        if (it) vis[s] = [G.GEAR_TIERS[it.tier].tier, it.q, it.plus];
+      for (const s2 of G.SLOTS) {
+        const it = p.equip[s2];
+        if (it) vis[s2] = [G.GEAR_TIERS[it.tier].tier, it.q, it.plus];
       }
+      const maxHp = calcStats(p).maxHp;
+      let pf = 0;
+      if (p.dead) pf |= 1;
+      if (hid) pf |= 2;
+      if (p.slowUntil && t < p.slowUntil) pf |= 4;
+      if (p.guardUntil > t) pf |= 8;
       ps.push({
-        id: p.id, name: p.name, cls: p.cls, lvl: p.lvl,
-        x: Math.round(p.x), y: Math.round(p.y), dir: p.dir,
-        hp: Math.ceil(p.hp), maxHp: calcStats(p).maxHp,
-        dead: p.dead, vis, wanted: p.guardUntil > t, bot: p.bot ? 1 : 0,
-        reborn: p.reborn || 0, hid: hid ? 1 : 0,
-        slow: (p.slowUntil && t < p.slowUntil) ? 1 : 0
+        id: p.id, hid,
+        a: [p.id, Math.round(p.x), Math.round(p.y), p.dir, Math.ceil(p.hp), pf],
+        // 靜態（名字、職業、等級、裝備外觀…只有變動時才送）
+        _st: { name: p.name, cls: p.cls, lvl: p.lvl, maxHp, vis, bot: p.bot ? 1 : 0, reborn: p.reborn || 0 },
+        _sig: p.name + p.cls + p.lvl + maxHp + (p.reborn || 0) + JSON.stringify(vis)
       });
     }
-    const mobs = w.mobs.filter((m) => !m.dead).map((m) => ({
-      uid: m.uid, kind: m.kind, x: Math.round(m.x), y: Math.round(m.y),
-      hp: Math.ceil(m.hp), maxHp: m.maxHp, dir: m.dir, boss: m.boss, po: m.poison ? 1 : 0,
-      rg: (m.boss && m.hp < m.maxHp && t - (m.lastFight || 0) > 5000) ? 1 : 0,
-      sl: (m.slowUntil && t < m.slowUntil) ? 1 : 0
-    }));
-    const drops = w.drops.map((d) => ({
-      uid: d.uid, x: Math.round(d.x), y: Math.round(d.y), q: d.item.q || 0, name: d.item.name,
-      tier: d.item.tier, slot: d.item.slot, cls: d.item.cls, plus: d.item.plus || 0
-    }));
-    const guards = w.guards.map((g) => ({ uid: g.uid, x: Math.round(g.x), y: Math.round(g.y), dir: g.dir, hp: Math.ceil(g.hp), maxHp: g.maxHp }));
-    const projectiles = w.projectiles.map((pr) => ({ uid: pr.uid, x: Math.round(pr.x), y: Math.round(pr.y), vx: pr.vx, vy: pr.vy, bomb: pr.bomb ? 1 : 0, ice: pr.ice ? 1 : 0 }));
-    const chests = w.chests.map((c) => ({ id: c.id, x: Math.round(c.x), y: Math.round(c.y), open: !!c.openAt }));
+    const liveMobs = w.mobs.filter((m) => !m.dead);
+    // 小地圖用的粗略光點：全圖怪物位置，但兩秒才送一次、座標除以 8（省流量又看得到怪在哪）
+    const mmBlips = mmTick ? liveMobs.map((m) => [Math.round(m.x / 8), Math.round(m.y / 8), m.boss ? 1 : 0]) : null;
     const anyHidden = ps.some((x) => x.hid);
-    const visible = anyHidden ? ps.filter((x) => !x.hid) : ps;
-    const s = JSON.stringify({ t: 'state', mobs, players: visible, drops, guards, projectiles, chests });
-    for (const ws of sockets) {
+    const visiblePs = anyHidden ? ps.filter((x) => !x.hid) : ps;
+
+    // 寶箱：位置與開關狀態沒變就不重送
+    const chestSig = w.chests.map((c) => c.id + (c.openAt ? '1' : '0') + Math.round(c.x) + ',' + Math.round(c.y)).join('|');
+
+    for (const ws of viewers) {
       const me = ws.player;
-      if (me && me.mapId === mapId && ws.readyState === 1) {
-        // 隱身中的玩家：別人看不到他，但他自己看得到自己
-        if (anyHidden && isHidden(me, t)) {
-          ws.send(JSON.stringify({ t: 'state', mobs, players: visible.concat(ps.filter((x) => x.id === me.id)), drops, guards, projectiles, chests }));
-        } else ws.send(s);
-        ws.send(JSON.stringify(privateState(me)));
+      // 以玩家為中心的可視矩形（前端會回報自己的視野大小）
+      const hw = (me.vw || DEF_VW) / 2 + VIEW_MARGIN;
+      const hh = (me.vh || DEF_VH) / 2 + VIEW_MARGIN;
+      const near = (e) => Math.abs(e.x - me.x) < hw && Math.abs(e.y - me.y) < hh;
+
+      // 怪物用「陣列」而不是物件傳送：欄位名稱本身就佔掉一半體積
+      // 格式 [uid, x, y, hp, dir, 旗標] ；第一次看到時後面再接 [種類, 血量上限, BOSS 類型]
+      const mseen = ws._mseen || (ws._mseen = new Set());
+      const mobs = [];
+      for (const m of liveMobs) {
+        if (!near(m)) continue;
+        let fl = 0;
+        if (m.poison) fl |= 1;
+        if (m.boss && m.hp < m.maxHp && t - (m.lastFight || 0) > 5000) fl |= 2;
+        if (m.slowUntil && t < m.slowUntil) fl |= 4;
+        const a = [m.uid, Math.round(m.x), Math.round(m.y), Math.ceil(m.hp), m.dir, fl];
+        if (!mseen.has(m.uid)) {          // 種類與血量上限一輩子不會變，只送第一次
+          mseen.add(m.uid);
+          a.push(m.kind, m.maxHp, m.boss || 0);
+        }
+        mobs.push(a);
       }
+      const drops = [];
+      for (const d of w.drops) {
+        if (!near(d)) continue;
+        drops.push({
+          uid: d.uid, x: Math.round(d.x), y: Math.round(d.y), q: d.item.q || 0, name: d.item.name,
+          tier: d.item.tier, slot: d.item.slot, cls: d.item.cls, plus: d.item.plus || 0
+        });
+      }
+      const guards = [];
+      for (const g of w.guards) if (near(g)) guards.push({ uid: g.uid, x: Math.round(g.x), y: Math.round(g.y), dir: g.dir, hp: Math.ceil(g.hp), maxHp: g.maxHp });
+      const projectiles = [];
+      for (const pr of w.projectiles) if (near(pr)) projectiles.push({ uid: pr.uid, x: Math.round(pr.x), y: Math.round(pr.y), vx: pr.vx, vy: pr.vy, bomb: pr.bomb ? 1 : 0, ice: pr.ice ? 1 : 0 });
+
+      // 隱身中的玩家：別人看不到他，但他自己看得到自己
+      const src = (anyHidden && isHidden(me, t))
+        ? visiblePs.concat(ps.filter((x) => x.id === me.id)) : visiblePs;
+      const pseen = ws._pseen || (ws._pseen = {});
+      const players = src.map((o) => {
+        if (pseen[o.id] === o._sig) return o.a;
+        pseen[o.id] = o._sig;
+        return o.a.concat([o._st]);       // 靜態資料只在變動時附在最後
+      });
+
+      const msg = { t: 'state', mobs, players, drops, guards, projectiles };
+      if (ws._chestSig !== chestSig) {          // 寶箱只在變動時附上
+        ws._chestSig = chestSig;
+        msg.chests = w.chests.map((c) => ({ id: c.id, x: Math.round(c.x), y: Math.round(c.y), open: !!c.openAt }));
+      }
+      if (mmTick) msg.mm = mmBlips;             // 小地圖光點：兩秒一次、座標壓縮成 1/8
+      ws.send(JSON.stringify(msg));
+      ws.send(JSON.stringify(meDelta(me, ws)));
     }
   });
 }, 100);

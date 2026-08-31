@@ -12,6 +12,15 @@ function resize() {
   W = innerWidth; H = innerHeight; cv.width = W; cv.height = H;
   viewScale = Math.max(0.5, Math.min(1, Math.min(W, H) / 720));
   VW = W / viewScale; VH = H / viewScale;
+  reportView();
+}
+// 告訴伺服器我看得到多大範圍 → 伺服器只送這個範圍內的怪物，省下大量流量
+function reportView() {
+  // resize() 在連線建立前就會被呼叫，所以要防呆（ws 這時還沒宣告）
+  try {
+    if (ws && ws.readyState === 1)
+      ws.send(JSON.stringify({ t: 'view', w: Math.ceil(VW), h: Math.ceil(VH) }));
+  } catch (e) {}
 }
 addEventListener('resize', resize); resize();
 
@@ -276,6 +285,7 @@ function serverURL() {
 
 function connect() {
   ws = new WebSocket(serverURL());
+  ws.onopen = () => reportView();
   ws.onmessage = (e) => handle(JSON.parse(e.data));
   ws.onclose = () => {
     $('#auth-err').textContent = '與伺服器斷線，請重新整理頁面';
@@ -310,6 +320,7 @@ function handle(m) {
       location.reload();
       break;
     case 'enter':
+      resetEntityCache(); meData = null;
       myId = m.you; myCls = m.cls; myName = m.name; mapId = m.mapId;
       me.snapped = false;
       prerenderMap(mapId);
@@ -319,7 +330,7 @@ function handle(m) {
       $('#hud').classList.remove('hidden');
       $('#zone').textContent = GAME.MAPS[mapId].name;
       break;
-    case 'map':
+    case 'map': resetEntityCache();
       mapId = m.mapId; me.snapped = false; stPrev = stCur = null;
       prerenderMap(mapId);
       $('#zone').textContent = GAME.MAPS[mapId].name;
@@ -327,10 +338,18 @@ function handle(m) {
       break;
     case 'state':
       stPrev = stCur; stPrevAt = stCurAt;
+      // 寶箱只在有變動時才會送來，沒送就沿用上一份（省流量）
+      if (!m.chests) m.chests = (stCur && stCur.chests) || [];
+      if (m.mm) mmBlips = m.mm;           // 小地圖光點（兩秒更新一次）
+      rehydrate(m);                       // 補回伺服器省略掉的固定欄位
       stCur = m; stCurAt = performance.now();
       break;
     case 'me':
-      meData = m;
+      // 伺服器只送「有變動的欄位」，所以要疊加到既有資料上（省流量）
+      meData = Object.assign(meData || {
+        inv: [], equip: { weapon: null, helmet: null, chest: null, legs: null, boots: null, cape: null },
+        skillCd: [0, 0, 0], flags: {}
+      }, m);
       if (m.dead && !dead) { dead = true; $('#deathview').classList.remove('hidden'); SND.die(); }
       if (!m.dead) { dead = false; $('#deathview').classList.add('hidden'); }
       updateHUD();
@@ -465,6 +484,42 @@ function renderRoster() {
   box.innerHTML = html;
 }
 function openPlayers() { togglePanel('players', true); renderRoster(); }
+
+/* ---- 伺服器只在「第一次看到」時送怪物種類、玩家名字這類固定資料，
+       之後每次只送座標與血量。這裡把省略掉的欄位補回來，
+       讓後面的繪圖與判定程式仍然拿到完整資料。 ---- */
+let mobCache = {}, plyCache = {}, mmBlips = [];
+function resetEntityCache() { mobCache = {}; plyCache = {}; mmBlips = []; }
+function rehydrate(m) {
+  // 怪物 [uid, x, y, hp, dir, 旗標] (+ [種類, 血量上限, boss])
+  if (m.mobs) {
+    const out = [];
+    for (const a of m.mobs) {
+      if (a.length > 6) mobCache[a[0]] = { kind: a[6], maxHp: a[7], boss: a[8] || null };
+      const c = mobCache[a[0]];
+      if (!c) continue;                   // 還沒收到基本資料就先不畫（下一次會補送）
+      const f = a[5];
+      out.push({ uid: a[0], x: a[1], y: a[2], hp: a[3], dir: a[4],
+        po: f & 1 ? 1 : 0, rg: f & 2 ? 1 : 0, sl: f & 4 ? 1 : 0,
+        kind: c.kind, maxHp: c.maxHp, boss: c.boss });
+    }
+    m.mobs = out;
+  }
+  // 玩家 [id, x, y, dir, hp, 旗標] (+ {靜態資料})
+  if (m.players) {
+    const out = [];
+    for (const a of m.players) {
+      if (a.length > 6) plyCache[a[0]] = a[6];
+      const c = plyCache[a[0]];
+      if (!c) continue;
+      const f = a[5];
+      out.push({ id: a[0], x: a[1], y: a[2], dir: a[3], hp: a[4],
+        dead: !!(f & 1), hid: f & 2 ? 1 : 0, slow: f & 4 ? 1 : 0, wanted: !!(f & 8),
+        name: c.name, cls: c.cls, lvl: c.lvl, maxHp: c.maxHp, vis: c.vis, bot: c.bot, reborn: c.reborn });
+    }
+    m.players = out;
+  }
+}
 
 /* ---------------- 特效 ---------------- */
 let effects = [], shakeAmt = 0;
@@ -3364,9 +3419,10 @@ function drawMinimap() {
   const sx = mmcv.width / MW, sy = mmcv.height / MH;
   mmg.clearRect(0, 0, 150, 110);
   mmg.drawImage(mmBase, 0, 0);
-  for (const mb of stCur.mobs) {
-    mmg.fillStyle = mb.boss ? '#ff8a3b' : '#d05050';
-    mmg.beginPath(); mmg.arc(mb.x * sx, mb.y * sy, mb.boss ? 3.5 : 1.6, 0, 7); mmg.fill();
+  // 怪物光點來自伺服器每兩秒送一次的粗略清單（畫面上的怪只送視野內的，不夠畫整張小地圖）
+  for (const q of mmBlips) {
+    mmg.fillStyle = q[2] ? '#ff8a3b' : '#d05050';
+    mmg.beginPath(); mmg.arc(q[0] * 8 * sx, q[1] * 8 * sy, q[2] ? 3.5 : 1.6, 0, 7); mmg.fill();
   }
   for (const c of stCur.chests) {
     if (c.open) continue;

@@ -9,7 +9,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const express = require('express');
 const { WebSocketServer } = require('ws');
-const G = require('./shared/gamedata.js');
+const G = require('./public/shared/gamedata.js');   // 放在 public 內，Cloudflare 才吃得到
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, 'data');
@@ -264,7 +264,7 @@ app.set('trust proxy', true);
 /* ---- 版本標記：讓瀏覽器每次更新後自動抓到新檔案（解決手機快取舊版） ---- */
 function buildTag() {
   const h = crypto.createHash('md5');
-  for (const f of ['public/client.js', 'public/index.html', 'shared/gamedata.js']) {
+  for (const f of ['public/client.js', 'public/index.html', 'public/shared/gamedata.js']) {
     try { h.update(String(fs.statSync(path.join(__dirname, f)).mtimeMs)); } catch (e) {}
   }
   return h.digest('hex').slice(0, 8);
@@ -288,7 +288,6 @@ const staticOpts = {
   }
 };
 app.use(express.static(path.join(__dirname, 'public'), staticOpts));
-app.use('/shared', express.static(path.join(__dirname, 'shared'), staticOpts));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, maxPayload: 16 * 1024 });
 
@@ -379,8 +378,10 @@ function newChar(cls, name) {
     mapId: 0, x: G.TOWN.statue.x + rnd(-50, 50), y: G.TOWN.statue.y + rnd(-40, 40), dir: 1,
     inv: [], equip: { weapon: null, helmet: null, chest: null, legs: null, boots: null, cape: null },
     arrows: cls === 'archer' ? 500 : 0, potions: 2, scrolls: 0, keys: 0, keyPity: 0,
-    flags: {}, hp: 0, atkAt: 0, potionAt: 0, skillAt: [0, 0], dead: false,
-    input: { dx: 0, dy: 0 }, lastHurt: 0, guardUntil: 0, poison: null
+    reborn: 0, bagExtra: 0,
+    flags: {}, hp: 0, atkAt: 0, potionAt: 0, skillAt: [0, 0, 0], dead: false,
+    input: { dx: 0, dy: 0 }, lastHurt: 0, guardUntil: 0, poison: null,
+    pvpAt: 0, stealthUntil: 0, ambush: false, slowUntil: 0, slowMul: 1
   };
   p.equip.weapon = makeEquip('novice', 'weapon', 0, cls);
   p.hp = calcStats(p).maxHp;
@@ -391,6 +392,7 @@ function serializeChar(p) {
     id: p.id, name: p.name, cls: p.cls, lvl: p.lvl, xp: p.xp, gold: p.gold,
     mapId: p.mapId, inv: p.inv, equip: p.equip,
     arrows: p.arrows, potions: p.potions, scrolls: p.scrolls, keys: p.keys, keyPity: p.keyPity,
+    reborn: p.reborn || 0, bagExtra: p.bagExtra || 0,
     flags: p.flags
   };
 }
@@ -400,7 +402,8 @@ function loadChar(saved) {
     id: saved.id, lvl: saved.lvl, xp: saved.xp, gold: saved.gold, mapId: saved.mapId || 0,
     inv: saved.inv || [], equip: Object.assign(p.equip, saved.equip || {}),
     arrows: saved.arrows || 0, potions: saved.potions || 0, scrolls: saved.scrolls || 0,
-    keys: saved.keys || 0, keyPity: saved.keyPity || 0, flags: saved.flags || {}
+    keys: saved.keys || 0, keyPity: saved.keyPity || 0, flags: saved.flags || {},
+    reborn: saved.reborn || 0, bagExtra: saved.bagExtra || 0
   });
   if (p.mapId === 3 && !p.flags.portalOpen) p.mapId = 2;
   const rp = respawnPoint(p.mapId === 3 ? 2 : p.mapId);
@@ -409,6 +412,9 @@ function loadChar(saved) {
   p.hp = calcStats(p).maxHp;
   return p;
 }
+function invCap(p) { return G.bagCap(p.bagExtra || 0); }
+function invFull(p) { return p.inv.length >= invCap(p); }
+
 function accountOf(ws) {
   if (ws.auth.guest) {
     if (!db.guests[ws.auth.key]) db.guests[ws.auth.key] = { chars: [] };
@@ -429,6 +435,7 @@ function persist(ws) {
 /* ---------------- 戰鬥 ---------------- */
 function giveXP(p, amount) {
   if (p.lvl >= G.LEVEL_CAP) return;
+  if (p.reborn) amount = Math.floor(amount * G.REBIRTH_XP_MUL);   // 一轉後經驗 150%
   p.xp += amount;
   let leveled = false;
   while (p.lvl < G.LEVEL_CAP && p.xp >= G.xpNeed(p.lvl)) {
@@ -489,6 +496,11 @@ function damagePlayer(victim, dmg, source) {
   if (victim.bot && source && source.type === 'player' && source.ref) {
     victim.grudgeId = source.ref.id;
     victim.grudgeUntil = now() + 20000;
+  }
+  // 玩家互毆 → 雙方 20 秒內不能住旅店
+  if (source && source.type === 'player' && source.ref) {
+    victim.pvpAt = now();
+    source.ref.pvpAt = now();
   }
   const def = calcStats(victim).def;
   const eff = Math.max(1, Math.floor(dmg * (100 / (100 + def)) * rnd(0.9, 1.1)));
@@ -554,6 +566,7 @@ function hitArea(p, cx, cy, radius, dmg, opts) {
     if (!G.hasLOS(p.mapId, cx, cy, mob.x, mob.y)) continue;
     damageMob(p.mapId, mob, dmg * rnd(0.9, 1.1), p, opts);
     if (opts && opts.poison) mob.poison = { left: opts.poison.ticks, dmg: opts.poison.dmg, owner: p.id, nextAt: now() + 1000 };
+    if (opts && opts.knock) knockBack(p.mapId, mob, cx, cy, opts.knock);
     hit++;
   }
   for (const g of [...w.guards]) {
@@ -568,9 +581,29 @@ function hitArea(p, cx, cy, radius, dmg, opts) {
     if (dist2(cx, cy, q.x, q.y) > (radius + 26) ** 2) continue;
     if (!G.hasLOS(p.mapId, cx, cy, q.x, q.y)) continue;
     damagePlayer(q, dmg, { type: 'player', ref: p });
+    if (opts && opts.knock) knockBack(p.mapId, q, cx, cy, opts.knock);
     hit++;
   }
   return hit;
+}
+/* 把目標從 (cx,cy) 往外推 dist 距離（碰到地形就停下） */
+function knockBack(mapId, ent, cx, cy, dist) {
+  const dx = ent.x - cx, dy = ent.y - cy;
+  const d = Math.hypot(dx, dy) || 1;
+  const step = 12, steps = Math.max(1, Math.round(dist / step));
+  for (let i = 0; i < steps; i++) {
+    const nx = ent.x + (dx / d) * step, ny = ent.y + (dy / d) * step;
+    if (G.blockedAt(mapId, nx, ny)) break;
+    ent.x = nx; ent.y = ny;
+  }
+}
+
+/* ---- 隱身現形（攻擊或放技能時呼叫） ---- */
+function breakStealth(p) {
+  if (p.stealthUntil && p.stealthUntil > now()) {
+    p.stealthUntil = 0;
+    ev(p.mapId, 'reveal', { id: p.id, x: p.x, y: p.y });
+  }
 }
 
 /* ---------------- 普通攻擊 ---------------- */
@@ -588,8 +621,16 @@ function playerAttack(p, aim) {
   p.dir = aim.x >= 0 ? 1 : -1;
   ev(p.mapId, 'atk', { id: p.id, cls: p.cls, ang });
 
-  const crit = Math.random() < c.crit;
-  const dmg = st.atk * c.dmgMul * (crit ? (c.critMul || 2.0) : 1) * rnd(0.9, 1.1);
+  let crit = Math.random() < c.crit;
+  let ambushMul = 1;
+  if (p.ambush) {                       // 隱身後的第一次普攻：370% 必定爆擊感
+    const sk3 = G.REBIRTH_SKILLS[p.cls];
+    ambushMul = (sk3 && sk3.ambush) || 1;
+    p.ambush = false; crit = true;
+    ev(p.mapId, 'ambush', { id: p.id, x: p.x, y: p.y });
+  }
+  breakStealth(p);                      // 普攻會現形
+  const dmg = st.atk * c.dmgMul * ambushMul * (crit ? (c.critMul || 2.0) : 1) * rnd(0.9, 1.1);
 
   if (p.cls === 'archer') {
     world[p.mapId].projectiles.push({
@@ -630,10 +671,12 @@ function playerAttack(p, aim) {
 
 /* ---------------- 技能 ---------------- */
 function castSkill(p, idx, aim) {
-  const sk = (G.SKILLS[p.cls] || [])[idx];
+  const sk = G.skillsOf(p.cls, p.reborn)[idx];
   if (!sk || p.dead) return;
   const t = now();
+  if (!p.skillAt[idx]) p.skillAt[idx] = 0;
   if (t - p.skillAt[idx] < sk.cd) return;
+  if (sk.type !== 'stealth') breakStealth(p);   // 放技能會現形
   if (sk.arrows) {
     if (p.arrows < sk.arrows) { if (p.ws) send(p.ws, { t: 'msg', msg: `箭矢不足（需要 ${sk.arrows} 支）` }); return; }
     p.arrows -= sk.arrows;
@@ -698,6 +741,30 @@ function castSkill(p, idx, aim) {
       p.x = x; p.y = y;
       ev(p.mapId, 'blink', { id: p.id, x0, y0, x1: x, y1: y });
       hitArea(p, x, y, sk.radius, base, { crit: true });
+      break;
+    }
+    case 'slam': {   // 【戰士・震地斬】跳起插劍、大範圍爆擊並擊退
+      const crit = Math.random() < sk.crit;
+      const dmg = base * (crit ? (c.critMul || 2.0) : 1);
+      ev(p.mapId, 'slam', { id: p.id, x: p.x, y: p.y, r: sk.radius });
+      hitArea(p, p.x, p.y, sk.radius, dmg, { crit, knock: sk.knock });
+      break;
+    }
+    case 'slowshot': { // 【射手・緩速箭】不耗箭矢，命中減速
+      const crit = Math.random() < sk.crit;
+      ev(p.mapId, 'atk', { id: p.id, cls: p.cls, ang });
+      world[p.mapId].projectiles.push({
+        uid: uid(), owner: p.id, x: p.x, y: p.y - 20,
+        vx: Math.cos(ang) * 640, vy: Math.sin(ang) * 640,
+        dmg: base * (crit ? (c.critMul || 2.0) : 1), left: c.range * 1.2, crit,
+        slow: { mul: sk.slowMul, ms: sk.slowMs }, ice: 1
+      });
+      break;
+    }
+    case 'stealth': {  // 【刺客・隱身突襲】隱身 3 秒＋下一次普攻 370%
+      p.stealthUntil = t + sk.dur;
+      p.ambush = true;
+      ev(p.mapId, 'vanish', { id: p.id, x: p.x, y: p.y });
       break;
     }
     case 'cone': { // 毒刃
@@ -797,8 +864,8 @@ function settleTrade(tr) {
   if (aItems.length !== A.items.length || bItems.length !== B.items.length) return endTrade(tr, '交易物品有變動，已取消。');
   if (A.p.gold < A.gold || B.p.gold < B.gold) return endTrade(tr, '金幣不足，交易取消。');
   if (aItems.some((i) => i.untradeable) || bItems.some((i) => i.untradeable)) return endTrade(tr, '含有無法交易的道具，已取消。');
-  if (A.p.inv.length - aItems.length + bItems.length > 40) return endTrade(tr, `${A.p.name} 的背包空間不足，交易取消。`);
-  if (B.p.inv.length - bItems.length + aItems.length > 40) return endTrade(tr, `${B.p.name} 的背包空間不足，交易取消。`);
+  if (A.p.inv.length - aItems.length + bItems.length > invCap(A.p)) return endTrade(tr, `${A.p.name} 的背包空間不足，交易取消。`);
+  if (B.p.inv.length - bItems.length + aItems.length > invCap(B.p)) return endTrade(tr, `${B.p.name} 的背包空間不足，交易取消。`);
   for (const it of aItems) A.p.inv.splice(A.p.inv.indexOf(it), 1);
   for (const it of bItems) B.p.inv.splice(B.p.inv.indexOf(it), 1);
   A.p.inv.push(...bItems); B.p.inv.push(...aItems);
@@ -826,7 +893,7 @@ function handleAction(ws, m) {
     }
     case 'skill': {
       const ax = +m.ax || 0, ay = +m.ay || 0;
-      castSkill(p, m.i === 1 ? 1 : 0, { x: ax || p.dir, y: ay });
+      castSkill(p, clamp(Math.floor(+m.i || 0), 0, 2), { x: ax || p.dir, y: ay });
       break;
     }
     case 'potion': {
@@ -845,7 +912,7 @@ function handleAction(ws, m) {
         if (dd < bd) { bd = dd; best = d; }
       }
       if (best) {
-        if (p.inv.length >= 40) { send(ws, { t: 'msg', msg: '背包已滿！' }); return; }
+        if (invFull(p)) { send(ws, { t: 'msg', msg: '背包已滿！' }); return; }
         w.drops.splice(w.drops.indexOf(best), 1);
         p.inv.push(best.item);
         send(ws, { t: 'msg', msg: `獲得【${best.item.name}】` });
@@ -882,7 +949,7 @@ function handleAction(ws, m) {
         const q = rollQuality(G.CHEST_QUALITY_ROLL);
         const slot = G.SLOTS[rndi(0, G.SLOTS.length - 1)];
         const it = makeEquip(tierByMap, slot, q, p.cls);
-        if (p.inv.length >= 40) { p.gold += 500; send(ws, { t: 'msg', msg: '背包已滿，寶箱折抵 500 金幣' }); }
+        if (invFull(p)) { p.gold += 500; send(ws, { t: 'msg', msg: '背包已滿，寶箱折抵 500 金幣' }); }
         else { p.inv.push(it); send(ws, { t: 'msg', msg: `寶箱獲得【${it.name}】` }); }
       }
       ev(p.mapId, 'chestOpen', { id: ch.id });
@@ -903,7 +970,7 @@ function handleAction(ws, m) {
     }
     case 'unequip': {
       const it = p.equip[m.slot];
-      if (!it || p.inv.length >= 40) return;
+      if (!it || invFull(p)) return;
       p.equip[m.slot] = null; p.inv.push(it);
       p.hp = Math.min(p.hp, calcStats(p).maxHp);
       break;
@@ -920,6 +987,8 @@ function handleAction(ws, m) {
     case 'buy': {
       if (m.what === 'inn') {
         if (!nearBuilding(p, 'inn')) return;
+        const left = G.INN_PVP_LOCK - (now() - (p.pvpAt || 0));
+        if (left > 0) { send(ws, { t: 'msg', msg: `⚔ 交戰中無法住宿！請等 ${Math.ceil(left / 1000)} 秒` }); return; }
         if (p.gold < G.INN_PRICE) { send(ws, { t: 'msg', msg: '金幣不足！' }); return; }
         p.gold -= G.INN_PRICE;
         p.hp = calcStats(p).maxHp;
@@ -942,6 +1011,14 @@ function handleAction(ws, m) {
         if (p.gold < n * G.ARROW_PRICE) { send(ws, { t: 'msg', msg: '金幣不足！' }); return; }
         p.gold -= n * G.ARROW_PRICE; p.arrows += n;
         send(ws, { t: 'msg', msg: `購買箭矢 ×${n}` });
+      } else if (m.what === 'bag' && nearBuilding(p, 'shop')) {
+        if (invCap(p) >= G.BAG_MAX) { send(ws, { t: 'msg', msg: `背包已達上限 ${G.BAG_MAX} 格！` }); return; }
+        const price = G.bagNextPrice(p.bagExtra || 0);
+        if (p.gold < price) { send(ws, { t: 'msg', msg: `金幣不足！本次擴充需要 ${price.toLocaleString()} 金幣` }); return; }
+        p.gold -= price;
+        p.bagExtra = (p.bagExtra || 0) + G.BAG_STEP;
+        send(ws, { t: 'msg', msg: `🎒 背包擴充成功！目前 ${invCap(p)} 格` });
+        persist(ws);
       } else if (m.what === 'gear' && nearBuilding(p, 'gear')) {
         const tierByMap = ['novice', 'steel', 'mithril'][p.mapId];
         if (!tierByMap) return;
@@ -950,7 +1027,7 @@ function handleAction(ws, m) {
         if (!G.SLOTS.includes(slot)) return;
         const price = slot === 'weapon' ? t.price.weapon : t.price.armor;
         if (p.gold < price) { send(ws, { t: 'msg', msg: '金幣不足！' }); return; }
-        if (p.inv.length >= 40) { send(ws, { t: 'msg', msg: '背包已滿！' }); return; }
+        if (invFull(p)) { send(ws, { t: 'msg', msg: '背包已滿！' }); return; }
         p.gold -= price;
         p.inv.push(makeEquip(tierByMap, slot, 0, p.cls));
         send(ws, { t: 'msg', msg: '購買成功！' });
@@ -1028,7 +1105,7 @@ function handleAction(ws, m) {
         if (i < 0) return;
         const l = db.market[i];
         if (l.sellerCharId !== p.id) { send(ws, { t: 'msg', msg: '這不是你的商品。' }); return; }
-        if (p.inv.length >= 40) { send(ws, { t: 'msg', msg: '背包已滿，無法下架！' }); return; }
+        if (invFull(p)) { send(ws, { t: 'msg', msg: '背包已滿，無法下架！' }); return; }
         db.market.splice(i, 1); dbDirty = true;
         p.inv.push(l.item);
         send(ws, { t: 'msg', msg: `已下架【${l.item.name}】` });
@@ -1042,7 +1119,7 @@ function handleAction(ws, m) {
         const l = db.market[i];
         if (l.sellerCharId === p.id) { send(ws, { t: 'msg', msg: '不能買自己的商品，可以直接下架。' }); return; }
         if (p.gold < l.price) { send(ws, { t: 'msg', msg: '金幣不足！' }); return; }
-        if (p.inv.length >= 40) { send(ws, { t: 'msg', msg: '背包已滿！' }); return; }
+        if (invFull(p)) { send(ws, { t: 'msg', msg: '背包已滿！' }); return; }
         db.market.splice(i, 1); dbDirty = true;
         p.gold -= l.price;
         p.inv.push(l.item);
@@ -1164,6 +1241,22 @@ function handleAction(ws, m) {
       if (m.scrolls) p.scrolls += +m.scrolls;
       if (m.keys) p.keys += +m.keys;
       if (m.tp) { p.x = +m.tp.x; p.y = +m.tp.y; }
+      break;
+    }
+    case 'rebirth': {
+      if (p.reborn) { send(ws, { t: 'msg', msg: '你已經一轉過了。' }); return; }
+      if (p.lvl < G.REBIRTH_LEVEL) { send(ws, { t: 'msg', msg: `需要等級 ${G.REBIRTH_LEVEL} 才能一轉！` }); return; }
+      p.reborn = 1;
+      p.lvl = 1; p.xp = 0;
+      p.skillAt = [0, 0, 0];
+      p.hp = calcStats(p).maxHp;
+      // 裝備、金幣、道具全部保留
+      const sk = G.REBIRTH_SKILLS[p.cls];
+      send(ws, { t: 'rebirth', ok: true, skill: sk });
+      broadcastAll({ t: 'announce', msg: `⭐ ${p.name} 完成了一轉！習得【${sk.name}】` });
+      broadcastAll({ t: 'chat', sys: 1, msg: `⭐【${p.name}】完成一轉，習得【${sk.name}】` });
+      ev(p.mapId, 'levelup', { id: p.id, lvl: 1, x: p.x, y: p.y });
+      persist(ws); pushRoster();
       break;
     }
     case 'backToSelect': {
@@ -1292,13 +1385,13 @@ wss.on('connection', (ws, req) => {
   ws.on('pong', () => { ws.isAlive = true; });
 });
 
-function charSummary(c) { return { name: c.name, cls: c.cls, lvl: c.lvl }; }
+function charSummary(c) { return { name: c.name, cls: c.cls, lvl: c.lvl, reborn: c.reborn || 0 }; }
 
 /* 全服線上玩家名單 */
 function rosterPayload() {
   const list = [];
   for (const p of allPlayers()) {
-    list.push({ id: p.id, name: p.name, cls: p.cls, lvl: p.lvl, map: p.mapId, dead: !!p.dead, bot: p.bot ? 1 : 0 });
+    list.push({ id: p.id, name: p.name, cls: p.cls, lvl: p.lvl, map: p.mapId, dead: !!p.dead, bot: p.bot ? 1 : 0, reborn: p.reborn || 0 });
   }
   list.sort((a, b) => b.lvl - a.lvl || a.name.localeCompare(b.name));
   return { t: 'roster', list };
@@ -1444,16 +1537,28 @@ function botTick(b, t) {
 function privateState(p) {
   const st = calcStats(p);
   const t = now();
-  const skills = G.SKILLS[p.cls] || [];
+  const skills = G.skillsOf(p.cls, p.reborn);
   return {
     t: 'me', lvl: p.lvl, xp: p.xp, xpNeed: G.xpNeed(p.lvl), gold: p.gold,
     hp: Math.ceil(p.hp), maxHp: st.maxHp, atk: st.atk, def: st.def,
     arrows: p.arrows, potions: p.potions, scrolls: p.scrolls, keys: p.keys,
     potionCd: Math.max(0, G.POTION_CD - (t - p.potionAt)),
-    skillCd: skills.map((sk, i) => Math.max(0, sk.cd - (t - p.skillAt[i]))),
-    inv: p.inv, equip: p.equip, flags: p.flags, dead: p.dead
+    skillCd: skills.map((sk, i) => Math.max(0, sk.cd - (t - (p.skillAt[i] || 0)))),
+    inv: p.inv, equip: p.equip, flags: p.flags, dead: p.dead,
+    reborn: p.reborn || 0, bagCap: invCap(p), bagPrice: G.bagNextPrice(p.bagExtra || 0),
+    innLock: Math.max(0, G.INN_PVP_LOCK - (t - (p.pvpAt || 0))),
+    stealth: Math.max(0, (p.stealthUntil || 0) - t), ambush: !!p.ambush
   };
 }
+
+/* 移動速度倍率：緩速箭會變慢、刺客隱身時變快 */
+function moveMul(p, t) {
+  let m = 1;
+  if (p.slowUntil && t < p.slowUntil) m *= p.slowMul || 1;
+  if (p.stealthUntil && t < p.stealthUntil) m *= (G.REBIRTH_SKILLS.assassin.speedMul || 1);
+  return m;
+}
+function isHidden(p, t) { return !!(p.stealthUntil && t < p.stealthUntil); }
 
 /* ---------------- 模擬迴圈 ---------------- */
 const TICK = 100;
@@ -1467,8 +1572,9 @@ setInterval(() => {
     const { dx, dy } = p.input;
     if (dx || dy) {
       const len = Math.hypot(dx, dy) || 1;
-      const nx = clamp(p.x + (dx / len) * c.speed * (TICK / 1000), 40, G.MAPS[p.mapId].w - 40);
-      const ny = clamp(p.y + (dy / len) * c.speed * (TICK / 1000), 40, G.MAPS[p.mapId].h - 40);
+      const sp = c.speed * moveMul(p, t);
+      const nx = clamp(p.x + (dx / len) * sp * (TICK / 1000), 40, G.MAPS[p.mapId].w - 40);
+      const ny = clamp(p.y + (dy / len) * sp * (TICK / 1000), 40, G.MAPS[p.mapId].h - 40);
       const r = tryMove(p.mapId, p.x, p.y, nx, ny);
       p.x = r.x; p.y = r.y;
       if (dx) p.dir = dx > 0 ? 1 : -1;
@@ -1501,6 +1607,7 @@ setInterval(() => {
       const aggro = mob.boss ? 360 : 220;
       for (const p of allPlayers()) {
         if (p.dead || p.mapId !== mapId) continue;
+        if (isHidden(p, t)) continue;               // 隱身中：怪物看不到
         if (mob.boss) {
           // BOSS 只守衛自己的領地
           if (dist2(p.x, p.y, mob.hx, mob.hy) > 380 * 380) continue;
@@ -1514,8 +1621,9 @@ setInterval(() => {
         const d = Math.sqrt(bd);
         const reach = info.size + 30;
         if (d > reach) {
-          const nx = mob.x + ((target.x - mob.x) / d) * info.speed * (TICK / 1000);
-          const ny = mob.y + ((target.y - mob.y) / d) * info.speed * (TICK / 1000);
+          const msp = info.speed * ((mob.slowUntil && t < mob.slowUntil) ? (mob.slowMul || 1) : 1);
+          const nx = mob.x + ((target.x - mob.x) / d) * msp * (TICK / 1000);
+          const ny = mob.y + ((target.y - mob.y) / d) * msp * (TICK / 1000);
           const r = tryMove(mapId, mob.x, mob.y, nx, ny);
           mob.x = r.x; mob.y = r.y;
         } else if (t - mob.atkAt > (mob.boss ? 1300 : 1100)) {
@@ -1584,7 +1692,10 @@ setInterval(() => {
           const r = G.MOBS[mob.kind].size * 0.7 + 10;
           if (dist2(pr.x, pr.y, mob.x, mob.y) < r * r) {
             if (pr.bomb) exploded = true;
-            else if (owner) damageMob(mapId, mob, pr.dmg, owner, { crit: pr.crit });
+            else if (owner) {
+              damageMob(mapId, mob, pr.dmg, owner, { crit: pr.crit });
+              if (pr.slow) { mob.slowUntil = t + pr.slow.ms; mob.slowMul = pr.slow.mul; ev(mapId, 'slow', { uid: mob.uid, x: mob.x, y: mob.y }); }
+            }
             gone = true; break;
           }
         }
@@ -1592,7 +1703,10 @@ setInterval(() => {
           if (q.dead || q.mapId !== mapId || q.id === pr.owner) continue;
           if (dist2(pr.x, pr.y, q.x, q.y) < 30 * 30) {
             if (pr.bomb) exploded = true;
-            else if (owner) damagePlayer(q, pr.dmg, { type: 'player', ref: owner });
+            else if (owner) {
+              damagePlayer(q, pr.dmg, { type: 'player', ref: owner });
+              if (pr.slow) { q.slowUntil = t + pr.slow.ms; q.slowMul = pr.slow.mul; ev(mapId, 'slow', { id: q.id, x: q.x, y: q.y }); }
+            }
             gone = true; break;
           }
         }
@@ -1631,6 +1745,7 @@ setInterval(() => {
     const ps = [];
     for (const p of allPlayers()) {
       if (p.mapId !== mapId) continue;
+      const hid = isHidden(p, t);
       const vis = {};
       for (const s of G.SLOTS) {
         const it = p.equip[s];
@@ -1640,26 +1755,35 @@ setInterval(() => {
         id: p.id, name: p.name, cls: p.cls, lvl: p.lvl,
         x: Math.round(p.x), y: Math.round(p.y), dir: p.dir,
         hp: Math.ceil(p.hp), maxHp: calcStats(p).maxHp,
-        dead: p.dead, vis, wanted: p.guardUntil > t, bot: p.bot ? 1 : 0
+        dead: p.dead, vis, wanted: p.guardUntil > t, bot: p.bot ? 1 : 0,
+        reborn: p.reborn || 0, hid: hid ? 1 : 0,
+        slow: (p.slowUntil && t < p.slowUntil) ? 1 : 0
       });
     }
     const mobs = w.mobs.filter((m) => !m.dead).map((m) => ({
       uid: m.uid, kind: m.kind, x: Math.round(m.x), y: Math.round(m.y),
       hp: Math.ceil(m.hp), maxHp: m.maxHp, dir: m.dir, boss: m.boss, po: m.poison ? 1 : 0,
-      rg: (m.boss && m.hp < m.maxHp && t - (m.lastFight || 0) > 5000) ? 1 : 0
+      rg: (m.boss && m.hp < m.maxHp && t - (m.lastFight || 0) > 5000) ? 1 : 0,
+      sl: (m.slowUntil && t < m.slowUntil) ? 1 : 0
     }));
     const drops = w.drops.map((d) => ({
       uid: d.uid, x: Math.round(d.x), y: Math.round(d.y), q: d.item.q || 0, name: d.item.name,
       tier: d.item.tier, slot: d.item.slot, cls: d.item.cls, plus: d.item.plus || 0
     }));
     const guards = w.guards.map((g) => ({ uid: g.uid, x: Math.round(g.x), y: Math.round(g.y), dir: g.dir, hp: Math.ceil(g.hp), maxHp: g.maxHp }));
-    const projectiles = w.projectiles.map((pr) => ({ uid: pr.uid, x: Math.round(pr.x), y: Math.round(pr.y), vx: pr.vx, vy: pr.vy, bomb: pr.bomb ? 1 : 0 }));
+    const projectiles = w.projectiles.map((pr) => ({ uid: pr.uid, x: Math.round(pr.x), y: Math.round(pr.y), vx: pr.vx, vy: pr.vy, bomb: pr.bomb ? 1 : 0, ice: pr.ice ? 1 : 0 }));
     const chests = w.chests.map((c) => ({ id: c.id, x: Math.round(c.x), y: Math.round(c.y), open: !!c.openAt }));
-    const s = JSON.stringify({ t: 'state', mobs, players: ps, drops, guards, projectiles, chests });
+    const anyHidden = ps.some((x) => x.hid);
+    const visible = anyHidden ? ps.filter((x) => !x.hid) : ps;
+    const s = JSON.stringify({ t: 'state', mobs, players: visible, drops, guards, projectiles, chests });
     for (const ws of sockets) {
-      if (ws.player && ws.player.mapId === mapId && ws.readyState === 1) {
-        ws.send(s);
-        ws.send(JSON.stringify(privateState(ws.player)));
+      const me = ws.player;
+      if (me && me.mapId === mapId && ws.readyState === 1) {
+        // 隱身中的玩家：別人看不到他，但他自己看得到自己
+        if (anyHidden && isHidden(me, t)) {
+          ws.send(JSON.stringify({ t: 'state', mobs, players: visible.concat(ps.filter((x) => x.id === me.id)), drops, guards, projectiles, chests }));
+        } else ws.send(s);
+        ws.send(JSON.stringify(privateState(me)));
       }
     }
   });

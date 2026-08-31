@@ -258,9 +258,24 @@ let meData = null;
 let stPrev = null, stCur = null, stPrevAt = 0, stCurAt = 0;
 let dead = false;
 
+/* ============================================================
+   伺服器位址設定
+   遊戲畫面放在 Cloudflare、遊戲伺服器在 Render，所以要指定伺服器網址。
+   ★ 換伺服器時只要改下面這一行（記得是 wss:// 兩個 s）。
+   本機測試（localhost / 區網 IP）會自動連本機，不用改。
+   ============================================================ */
+const SERVER_URL = 'wss://dragonlord-online.onrender.com';
+
+function serverURL() {
+  const h = location.hostname;
+  const isLocal = h === 'localhost' || h === '127.0.0.1' || h === '' ||
+                  /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h);
+  if (isLocal) return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+  return SERVER_URL;
+}
+
 function connect() {
-  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-  ws = new WebSocket(proto + location.host);
+  ws = new WebSocket(serverURL());
   ws.onmessage = (e) => handle(JSON.parse(e.data));
   ws.onclose = () => {
     $('#auth-err').textContent = '與伺服器斷線，請重新整理頁面';
@@ -333,13 +348,18 @@ function handle(m) {
       break;
     case 'loot': toast('💰 +' + m.gold.toLocaleString() + ' 金幣'); SND.coin(); break;
     case 'memento': announce('🏅 獲得首殺紀念道具【' + m.name + '】！已放入背包'); SND.level(); break;
-    case 'announce': announce(m.msg); break;
+    case 'announce': announce(m.msg); addSys(m.msg); break;
     case 'chat': addChat(m); break;
     case 'chatHistory': (m.lines || []).forEach((l) => addChat(l, true)); break;
     case 'roster': roster = m.list || []; $('#onlinen').textContent = roster.length + ' 人';
       if (!$('#players').classList.contains('hidden')) renderRoster(); break;
     case 'dead': dead = true; $('#deathview').classList.remove('hidden'); SND.die(); break;
     case 'market': marketData = m.list || []; renderMarket(); break;
+    case 'rebirth':
+      announce(`⭐ 一轉完成！習得新技能【${m.skill.name}】（快捷鍵 T）`, 8000);
+      addSys(`你完成了一轉，習得【${m.skill.name}】，經驗值獲取變為 150%`);
+      SND.level(); setupSkillbar();
+      break;
     case 'trade': handleTrade(m); break;
     case 'enhance': {
       const fx = $('#enhfx');
@@ -354,34 +374,63 @@ function handle(m) {
 /* ---------------- 全服聊天 ---------------- */
 const chatLines = [];
 function chatOpen() { return !$('#chatpanel').classList.contains('hidden'); }
+/* 聊天分成兩區：玩家聊天（chatLines）與系統通知（sysLines） */
+let sysLines = [], chatTab = 'say', unread = { say: 0, sys: 0 };
+function hhmm() { const d = new Date(); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); }
+function addSys(msg, quiet) {
+  sysLines.push({ msg, tm: hhmm() });
+  if (sysLines.length > 120) sysLines.shift();
+  if (!quiet && !(chatOpen() && chatTab === 'sys')) { unread.sys++; $('#chatdot').classList.remove('hidden'); }
+  renderChat();
+}
 function addChat(m, quiet) {
+  if (m.sys) { addSys(m.msg, quiet); return; }      // 系統訊息改進系統通知區
   chatLines.push(m);
   if (chatLines.length > 80) chatLines.shift();
   renderChat();
   if (!quiet) {
-    if (!chatOpen()) {
+    if (!(chatOpen() && chatTab === 'say')) {
+      unread.say++;
       $('#chatdot').classList.remove('hidden');
-      if (!m.sys) toast('💬 ' + m.name + '：' + m.msg, 5000);
+      toast('💬 ' + m.name + '：' + m.msg, 5000);
     }
-    if (!m.sys) SND.pick();
+    SND.pick();
   }
 }
 function renderChat() {
-  const feed = $('#chatfeed');
-  if (!feed) return;
+  const feed = $('#chatfeed'), sfeed = $('#sysfeed');
+  if (!feed || !sfeed) return;
   const atBottom = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 30;
-  feed.innerHTML = chatLines.map((m) => m.sys
-    ? `<div class="ln sys">📢 ${esc(m.msg)}</div>`
-    : `<div class="ln${m.name === myName ? ' me' : ''}"><span class="zn">[${esc(m.zone || '')}]</span>
-       <span class="nm">${esc(m.name)}</span>：${esc(m.msg)}</div>`).join('');
+  const satBottom = sfeed.scrollTop + sfeed.clientHeight >= sfeed.scrollHeight - 30;
+  feed.innerHTML = chatLines.length
+    ? chatLines.map((m) => `<div class="ln${m.name === myName ? ' me' : ''}"><span class="zn">[${esc(m.zone || '')}]</span>
+       <span class="nm">${esc(m.name)}</span>：${esc(m.msg)}</div>`).join('')
+    : '<div style="color:#667;font-size:12px">還沒有人說話，打聲招呼吧！</div>';
+  sfeed.innerHTML = sysLines.length
+    ? sysLines.map((l) => `<div class="ln"><span class="tm">${l.tm}</span>${esc(l.msg)}</div>`).join('')
+    : '<div style="color:#667;font-size:12px">目前沒有系統通知</div>';
   if (atBottom) feed.scrollTop = feed.scrollHeight;
+  if (satBottom) sfeed.scrollTop = sfeed.scrollHeight;
+  for (const k of ['say', 'sys']) {
+    const d = $('#' + k + 'dot');
+    d.textContent = unread[k]; d.classList.toggle('hidden', !unread[k]);
+  }
 }
+function setChatTab(k) {
+  chatTab = k; unread[k] = 0;
+  $$('[data-ctab]').forEach((b) => b.classList.toggle('on', b.dataset.ctab === k));
+  $('#chatfeed').classList.toggle('hidden', k !== 'say');
+  $('#sysfeed').classList.toggle('hidden', k !== 'sys');
+  if (!unread.say && !unread.sys) $('#chatdot').classList.add('hidden');
+  renderChat();
+  const f = $(k === 'say' ? '#chatfeed' : '#sysfeed');
+  f.scrollTop = f.scrollHeight;
+}
+$$('[data-ctab]').forEach((b) => b.onclick = () => setChatTab(b.dataset.ctab));
 function openChat() {
   togglePanel('chatpanel', true);
-  $('#chatdot').classList.add('hidden');
-  renderChat();
-  $('#chatfeed').scrollTop = $('#chatfeed').scrollHeight;
-  setTimeout(() => $('#chatinput').focus(), 60);
+  setChatTab(chatTab);
+  setTimeout(() => { if (chatTab === 'say') $('#chatinput').focus(); }, 60);
 }
 function sendChat() {
   const el = $('#chatinput');
@@ -406,7 +455,7 @@ function renderRoster() {
     for (const p of groups[mi]) {
       html += `<div class="prow${p.id === myId ? ' self' : ''}">
         <span class="cdot" style="background:${CLS_COLOR[p.cls]}"></span>
-        <span class="lv">Lv.${p.lvl}</span>
+        <span class="lv">Lv.${p.lvl}${p.reborn ? '<span class="rbtag">1轉</span>' : ''}</span>
         <span class="pn">${esc(p.name)}${p.bot ? ' <span style="color:#7f8aa8;font-size:11px">🤖</span>' : ''}${p.id === myId ? ' <span style="color:var(--gold);font-size:11px">（你）</span>' : ''}</span>
         <span class="cl">${GAME.CLASSES[p.cls].name}</span>
         ${p.dead ? '<span class="st">💀 陣亡</span>' : ''}
@@ -494,6 +543,32 @@ function handleEvent(m) {
       effects.push({ type: 'cone', id: m.id, ang: m.ang, r: m.r, t0: t });
       effects.push({ type: 'poisoncloud', id: m.id, ang: m.ang, r: m.r, t0: t });
       SND.skill(); break;
+    /* ---- 一轉技能特效 ---- */
+    case 'slam':      // 戰士・震地斬
+      markCombat(m.id);
+      effects.push({ type: 'slamfx', x: m.x, y: m.y, r: m.r, t0: t });
+      effects.push({ type: 'shock', x: m.x, y: m.y, r: m.r, t0: t, col: '#ffd76e' });
+      effects.push({ type: 'shock', x: m.x, y: m.y, r: m.r * 0.6, t0: t + 90, col: '#fff0b8' });
+      effects.push({ type: 'flash', t0: t, col: '255,214,110' });
+      spawnParticles(m, 34, '#e8c874', 420);
+      SND.boom(); shake(m.id === myId ? 18 : 10); break;
+    case 'vanish':    // 刺客・隱身
+      effects.push({ type: 'smoke', x: m.x, y: m.y, t0: t, col: '#8f7ad6' });
+      spawnParticles(m, 18, '#9b86e0', 200);
+      if (m.id === myId) announce('🌑 隱身中…下一次普攻造成 370% 傷害', 3200);
+      SND.skill(); break;
+    case 'reveal':
+      effects.push({ type: 'smoke', x: m.x, y: m.y, t0: t, col: '#6f6a86' });
+      break;
+    case 'ambush':    // 隱身突襲命中
+      effects.push({ type: 'crossfx', x: m.x, y: m.y, t0: t, col: '#ffb0f0' });
+      effects.push({ type: 'shock', x: m.x, y: m.y, r: 90, t0: t, col: '#ff9de8' });
+      if (m.id === myId) shake(10);
+      SND.crit(); break;
+    case 'slow':      // 緩速箭命中
+      effects.push({ type: 'frost', x: m.x, y: m.y, t0: t });
+      spawnParticles(m, 14, '#9fd8ff', 160);
+      SND.hit(); break;
     case 'boom':
       effects.push({ type: 'boomfx', x: m.x, y: m.y, r: m.r, t0: t });
       effects.push({ type: 'shock', x: m.x, y: m.y, r: m.r * 1.5, t0: t, col: '#ffca6e' });
@@ -568,6 +643,7 @@ addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if (k === 'b') togglePanel('bag');
   if (k === 'p') { if ($('#players').classList.contains('hidden')) openPlayers(); else { $('#players').classList.add('hidden'); syncScrim(); } }
+  if (k === 't') castSkill(2, true);
   if (k === 'q') castSkill(0, true);
   if (k === 'e') castSkill(1, true);
   if (k === 'r') usePotion();
@@ -659,10 +735,12 @@ function aimAtNearest() {
 }
 
 /* ---------------- 技能 ---------------- */
+function mySkills() { return GAME.skillsOf(myCls, meData && meData.reborn); }
 function setupSkillbar() {
-  const sks = GAME.SKILLS[myCls] || [];
-  sks.forEach((sk, i) => {
+  [0, 1, 2].forEach((i) => {
+    const sk = GAME.skillsOf(myCls, 1)[i];
     const el = $('#sk' + i);
+    if (!sk || !el) return;
     el.querySelector('.ic').textContent = sk.icon;
     el.querySelector('.nm').textContent = sk.name;
     el.title = `${sk.name}（${sk.key}）— ${sk.desc}`;
@@ -672,6 +750,7 @@ function setupSkillbar() {
 }
 function castSkill(i, useMouse) {
   if (!meData || dead) return;
+  if (i === 2 && !meData.reborn) { toast('一轉後才能使用這個技能'); return; }
   if ((meData.skillCd || [])[i] > 0) return;
   let aim = aimAtNearest();
   if (useMouse) {
@@ -1063,7 +1142,7 @@ function renderBag(force) {
   const sig = bagSignature();
   if (!force && sig === bagSig) return;      // 內容沒變就不重畫（避免清掉選取與說明）
   bagSig = sig;
-  $('#baginfo').innerHTML = `💰 <b style="color:var(--gold)">${meData.gold.toLocaleString()}</b>　🏹 ${meData.arrows}　🧪 ${meData.potions}　📜 ${meData.scrolls}　🔑 ${meData.keys}/${GAME.KEYS_NEEDED}　（${meData.inv.length}/40）`;
+  $('#baginfo').innerHTML = `💰 <b style="color:var(--gold)">${meData.gold.toLocaleString()}</b>　🏹 ${meData.arrows}　🧪 ${meData.potions}　📜 ${meData.scrolls}　🔑 ${meData.keys}/${GAME.KEYS_NEEDED}　（${meData.inv.length}/${meData.bagCap || GAME.BAG_BASE}）`;
   const eq = $('#equipslots'); eq.innerHTML = '';
   GAME.SLOTS.forEach((s) => {
     const it = meData.equip[s];
@@ -1107,6 +1186,12 @@ function refreshSelection() {
 }
 $('#btn-equip').onclick = () => { if (selUid) send({ t: 'equip', uid: selUid }); };
 $('#btn-drop').onclick = () => { if (selUid) send({ t: 'drop', uid: selUid }); };
+$('#btn-rebirth').onclick = () => {
+  const sk = GAME.REBIRTH_SKILLS[myCls];
+  if (confirm(`確定要一轉嗎？\n\n・等級會變回 Lv.1（經驗歸零）\n・裝備、金幣、道具全部保留\n・之後打怪經驗值變成 150%\n・習得新技能【${sk.name}】（快捷鍵 T）\n\n這個動作無法還原。`))
+    send({ t: 'rebirth' });
+};
+$('#btn-bagbuy').onclick = () => send({ t: 'buy', what: 'bag' });
 
 /* ---- 商店共用：持有資源列 ---- */
 function renderWallet(sel, extra) {
@@ -1122,6 +1207,15 @@ function renderShop() {
   renderWallet('#shopwallet');
   // 非射手不顯示箭矢，直式手機少捲一大段
   $$('#shop .arrowonly').forEach((r) => r.classList.toggle('hidden', myCls !== 'archer'));
+  // 背包擴充
+  const cap = meData.bagCap || GAME.BAG_BASE, price = meData.bagPrice || GAME.BAG_PRICE_STEP;
+  const maxed = cap >= GAME.BAG_MAX;
+  $('#baginfo2').textContent = maxed
+    ? `已達上限 ${GAME.BAG_MAX} 格`
+    : `目前 ${cap} 格 → ${cap + GAME.BAG_STEP} 格（每次擴充價格遞增 10 萬）`;
+  $('#bagprice').textContent = maxed ? '—' : price.toLocaleString() + ' 💰';
+  $('#btn-bagbuy').disabled = maxed || meData.gold < price;
+  $('#btn-bagbuy').textContent = maxed ? '已達上限' : '擴充 +10';
   // 買不起的直接變灰，不用點了才知道
   $$('#shop [data-buy]').forEach((b) => {
     const unit = { potion: GAME.POTION_PRICE, scroll: GAME.SCROLL_PRICE, arrows: GAME.ARROW_PRICE }[b.dataset.buy] || 0;
@@ -1402,7 +1496,15 @@ function updateHUD() {
   $('#hpfill').style.width = (m.hp / m.maxHp * 100) + '%';
   $('#hptext').textContent = `${m.hp} / ${m.maxHp}`;
   $('#xpfill').style.width = (m.xp / m.xpNeed * 100) + '%';
-  $('#xptext').textContent = `Lv.${m.lvl}　${m.xp.toLocaleString()} / ${m.xpNeed.toLocaleString()} EXP`;
+  // 窄螢幕（手機）用精簡格式，避免「1轉」把等級文字擠出經驗條
+  const narrow = window.innerWidth < 821;
+  $('#xptext').innerHTML = narrow
+    ? `Lv.${m.lvl}${m.reborn ? '<span class="rbtag">轉</span>' : ''} ${m.xp.toLocaleString()}/${m.xpNeed.toLocaleString()}`
+    : `Lv.${m.lvl}${m.reborn ? '<span class="rbtag">1轉</span>' : ''}　${m.xp.toLocaleString()} / ${m.xpNeed.toLocaleString()} EXP`;
+  // 一轉技能鈕：一轉後才出現
+  $('#sk2').classList.toggle('hidden', !m.reborn);
+  // 背包面板的一轉按鈕
+  $('#btn-rebirth').classList.toggle('hidden', !!m.reborn || m.lvl < GAME.REBIRTH_LEVEL);
   const keyPart = (mapId === 2 || m.keys > 0) && !(m.flags || {}).portalOpen ? `<span style="color:#ffd76e">🔑 ${m.keys}/${GAME.KEYS_NEEDED}</span>` : '';
   $('#stats').innerHTML = `<span>⚔ ${m.atk}</span><span>🛡 ${m.def}</span>
     <span class="gold-ico">💰 ${m.gold.toLocaleString()}</span>
@@ -1411,8 +1513,9 @@ function updateHUD() {
   const cd = $('#potcd');
   if (m.potionCd > 0) { cd.classList.remove('hidden'); cd.textContent = Math.ceil(m.potionCd / 1000); }
   else cd.classList.add('hidden');
-  (GAME.SKILLS[myCls] || []).forEach((sk, i) => {
+  GAME.skillsOf(myCls, m.reborn).forEach((sk, i) => {
     const el = $('#sk' + i);
+    if (!el) return;
     const left = (m.skillCd || [])[i] || 0;
     const frac = left / sk.cd;
     el.querySelector('.cdov').style.background = left > 0
@@ -2786,6 +2889,20 @@ function drawDoll() {
   g.fillText(`${myName}　Lv.${meData.lvl} ${GAME.CLASSES[myCls].name}`, cw / 2, 16);
 }
 
+/* 被緩速的目標腳下畫一圈冰霜 */
+function frostAura(g, x, y, r) {
+  g.save();
+  const pulse = 0.75 + Math.sin(performance.now() / 200) * 0.15;
+  g.globalAlpha = 0.55 * pulse;
+  const gr = g.createRadialGradient(x, y, r * 0.2, x, y, r * 1.5);
+  gr.addColorStop(0, 'rgba(159,216,255,.55)'); gr.addColorStop(1, 'rgba(120,190,255,0)');
+  g.fillStyle = gr;
+  g.beginPath(); g.ellipse(x, y, r * 1.5, r * 0.9, 0, 0, TAU); g.fill();
+  g.strokeStyle = 'rgba(190,232,255,.8)'; g.lineWidth = 2;
+  g.beginPath(); g.ellipse(x, y, r * 1.05, r * 0.62, 0, 0, TAU); g.stroke();
+  g.restore();
+}
+
 /* ---------------- 主渲染迴圈 ---------------- */
 function lerp(a, b, t) { return a + (b - a) * t; }
 function getInterp() {
@@ -2902,12 +3019,18 @@ function frame() {
         const pl = ent.o;
         const p = pl.id === myId ? { x: me.x, y: me.y } : ipos(pl, pv && pv.players, f, 'id');
         const dir = pl.id === myId ? me.dir : pl.dir;
-        drawChar(ctx, pl.cls, p.x, p.y, 74, dir || 1, pl.vis, pl.hp / pl.maxHp, pl.name, pl.lvl, pl.dead, pl.wanted, pl.id === myId, pl.id);
+        if (pl.slow) frostAura(ctx, p.x, p.y, 30);
+        ctx.save();
+        if (pl.hid) ctx.globalAlpha = 0.4;      // 隱身中：只有自己看得到，畫成半透明
+        drawChar(ctx, pl.cls, p.x, p.y, 74, dir || 1, pl.vis, pl.hp / pl.maxHp,
+          pl.name + (pl.reborn ? ' ★' : ''), pl.lvl, pl.dead, pl.wanted, pl.id === myId, pl.id);
+        ctx.restore();
         pl._x = p.x; pl._y = p.y;
         continue;
       }
       const mb = ent.o;
       const p = ipos(mb, pv && pv.mobs, f);
+      if (mb.sl) frostAura(ctx, p.x, p.y, GAME.MOBS[mb.kind].size * 0.7);
       const info = GAME.MOBS[mb.kind];
       const img = SPRITES[info.sprite];
       const hh = info.size * 1.5;
@@ -2954,6 +3077,15 @@ function frame() {
       if (pr.bomb) {
         ctx.fillStyle = '#ff7a1a'; ctx.beginPath(); ctx.arc(0, 0, 7, 0, 7); ctx.fill();
         ctx.strokeStyle = '#ffd54a'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, 10, 0, 7); ctx.stroke();
+      } else if (pr.ice) {                       // 緩速箭：拖著寒氣的冰藍箭
+        ctx.save(); ctx.shadowColor = '#9fd8ff'; ctx.shadowBlur = 12;
+        ctx.strokeStyle = 'rgba(159,216,255,.55)'; ctx.lineWidth = 7;
+        ctx.beginPath(); ctx.moveTo(-24, 0); ctx.lineTo(8, 0); ctx.stroke();
+        ctx.strokeStyle = '#dff2ff'; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(-13, 0); ctx.lineTo(11, 0); ctx.stroke();
+        ctx.fillStyle = '#eaf8ff'; ctx.beginPath();
+        ctx.moveTo(14, 0); ctx.lineTo(6, -4); ctx.lineTo(6, 4); ctx.closePath(); ctx.fill();
+        ctx.restore();
       } else {
         ctx.strokeStyle = '#e8d9a0'; ctx.lineWidth = 3;
         ctx.beginPath(); ctx.moveTo(-12, 0); ctx.lineTo(10, 0); ctx.stroke();
@@ -3108,6 +3240,61 @@ function frame() {
       ctx.fillStyle = gr;
       ctx.beginPath(); ctx.arc(e.x, e.y, e.r * prog + 20, 0, 7); ctx.fill();
       ctx.globalAlpha = 1;
+    } else if (e.type === 'slamfx') {                       // 震地斬：地裂＋塵浪
+      if (age > 620) { effects.splice(i, 1); continue; }
+      const prog = age / 620;
+      ctx.save();
+      // 地面裂縫
+      ctx.globalAlpha = (1 - prog) * 0.9;
+      ctx.strokeStyle = '#3a2a12'; ctx.lineWidth = 7 * (1 - prog * 0.5); ctx.lineCap = 'round';
+      for (let j = 0; j < 9; j++) {
+        const a = (j / 9) * TAU + (e.x % 1);
+        const len = e.r * Math.min(1, prog * 1.6) * (0.55 + ((j * 37) % 10) / 22);
+        ctx.beginPath(); ctx.moveTo(e.x, e.y);
+        ctx.lineTo(e.x + Math.cos(a) * len * 0.5, e.y + Math.sin(a) * len * 0.32);
+        ctx.lineTo(e.x + Math.cos(a + 0.16) * len, e.y + Math.sin(a + 0.16) * len * 0.62);
+        ctx.stroke();
+      }
+      // 金色地面光暈（橢圓＝45度俯視）
+      ctx.globalAlpha = (1 - prog) * 0.55;
+      const gg = ctx.createRadialGradient(e.x, e.y, 8, e.x, e.y, e.r * Math.min(1, prog * 1.4));
+      gg.addColorStop(0, '#fff3c4'); gg.addColorStop(0.55, '#e8c874'); gg.addColorStop(1, '#e8c87400');
+      ctx.fillStyle = gg;
+      ctx.beginPath(); ctx.ellipse(e.x, e.y, e.r * Math.min(1, prog * 1.4), e.r * 0.62 * Math.min(1, prog * 1.4), 0, 0, TAU); ctx.fill();
+      // 揚起的塵浪
+      ctx.globalAlpha = (1 - prog) * 0.75;
+      ctx.strokeStyle = '#ffe9b0'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.ellipse(e.x, e.y, e.r * prog, e.r * 0.62 * prog, 0, 0, TAU); ctx.stroke();
+      ctx.restore(); ctx.globalAlpha = 1;
+    } else if (e.type === 'smoke') {                        // 隱身／現形的煙霧
+      if (age > 520) { effects.splice(i, 1); continue; }
+      const prog = age / 520;
+      ctx.globalAlpha = (1 - prog) * 0.8;
+      for (let j = 0; j < 10; j++) {
+        const a = (j / 10) * TAU;
+        const r = 12 + prog * 46;
+        ctx.fillStyle = e.col;
+        ctx.beginPath();
+        ctx.arc(e.x + Math.cos(a) * r, e.y - 22 + Math.sin(a) * r * 0.6, 13 * (1 - prog * 0.7), 0, TAU);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    } else if (e.type === 'frost') {                        // 緩速箭命中：冰晶
+      if (age > 700) { effects.splice(i, 1); continue; }
+      const prog = age / 700;
+      ctx.save(); ctx.globalAlpha = 1 - prog;
+      ctx.strokeStyle = '#bfe8ff'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+      for (let j = 0; j < 6; j++) {
+        const a = (j / 6) * TAU + prog * 0.8;
+        const r1 = 8, r2 = 20 + prog * 16;
+        ctx.beginPath();
+        ctx.moveTo(e.x + Math.cos(a) * r1, e.y - 22 + Math.sin(a) * r1 * 0.7);
+        ctx.lineTo(e.x + Math.cos(a) * r2, e.y - 22 + Math.sin(a) * r2 * 0.7);
+        ctx.stroke();
+      }
+      ctx.fillStyle = 'rgba(159,216,255,.35)';
+      ctx.beginPath(); ctx.ellipse(e.x, e.y, 26 * (1 - prog * 0.4), 15 * (1 - prog * 0.4), 0, 0, TAU); ctx.fill();
+      ctx.restore(); ctx.globalAlpha = 1;
     } else if (e.type === 'puff') {
       if (age > 500) { effects.splice(i, 1); continue; }
       const prog = age / 500, n = e.big ? 14 : 7;
